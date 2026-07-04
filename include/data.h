@@ -34,6 +34,7 @@ typedef struct {
     char nrca[256], lteca[256], ltecasig[256];
     char wan_status[32];
     char net_select[16];
+    int  hsr;
     char sa_bands[256], nsa_bands[256], lte_bands[256];
 
     /* battery */

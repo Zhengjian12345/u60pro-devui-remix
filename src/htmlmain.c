@@ -10,16 +10,21 @@
  */
 #include "drm_disp.h"
 #include "data.h"
+#include "json.h"
 #include "touch_input.h"
 #include "key_input.h"
 #include "backlight.h"
 #include "devui_ext.h"
 
+#include <arpa/inet.h>
 #include <dirent.h>
 #include <math.h>
+#include <netinet/in.h>
 #include <signal.h>
 #include <stdint.h>
+#include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/time.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -52,6 +57,9 @@ static void        maybe_dump_fb(drm_disp_t *d);
 #define UI_DIR "/data/plugins/u60pro-devui/ui"
 #endif
 #define UI_FONT "/usr/ui/fonts/ZTEZhengYuan.ttf"
+#define DATAD_HTTP_ADDR "127.0.0.1"
+#define DATAD_HTTP_PORT 19460
+#define DATAD_HTTP_TIMEOUT_MS 300
 
 static volatile sig_atomic_t g_run = 1;
 static void on_sig(int s) { (void)s; g_run = 0; }
@@ -93,6 +101,8 @@ static int  g_scroll;     /* current page vertical scroll offset */
 static int  g_page_h;     /* last rendered page content height */
 static int  g_autooff_ms; /* auto screen-off timeout, 0 = never */
 static int  g_refresh_ms = 1000; /* state refresh interval, 0 = paused */
+static int  g_sig_read;   /* ML1/raw signaling read switch */
+static int  g_sig_parse;  /* decoded LTE/NR signaling parse switch + page visibility */
 static int  g_saved_bright = -1; /* persisted backlight level, -1 = none yet */
 static int g_last_clock_min = -1;       /* HH:MM changes only once per minute */
 static char g_render_html_cache[PAGE_HTML_CACHE_CAP];
@@ -239,9 +249,12 @@ static void scan_pages(void)
     struct dirent *de;
     while ((de = readdir(dp)) && n < 24) {
         size_t l = strlen(de->d_name);
-        if (l > 5 && strcmp(de->d_name + l - 5, ".html") == 0 &&
+        if (de->d_name[0] != '.' &&
+            l > 5 && strcmp(de->d_name + l - 5, ".html") == 0 &&
             strcmp(de->d_name, "menu.html") != 0 &&
             strcmp(de->d_name, "lockscreen.html") != 0) {
+            if (!g_sig_parse && strcmp(de->d_name, "01a-cell.html") == 0)
+                continue;
             strncpy(names[n], de->d_name, 63); names[n][63] = 0; n++;
         }
     }
@@ -254,6 +267,35 @@ static void scan_pages(void)
     for (int i = 0; i < n; i++)
         snprintf(g_pages[i], sizeof g_pages[i], "%s/%s", UI_DIR, names[i]);
     g_npages = n;
+}
+
+static void rescan_pages_keep_current(void)
+{
+    char cur_name[64];
+
+    cur_name[0] = 0;
+    if (g_npages > 0 && g_cur >= 0 && g_cur < g_npages) {
+        const char *base = strrchr(g_pages[g_cur], '/');
+        snprintf(cur_name, sizeof cur_name, "%s", base ? base + 1 : g_pages[g_cur]);
+    }
+
+    scan_pages();
+    if (g_npages <= 0) {
+        g_cur = 0;
+        return;
+    }
+    if (cur_name[0]) {
+        for (int i = 0; i < g_npages; i++) {
+            const char *base = strrchr(g_pages[i], '/');
+            const char *name = base ? base + 1 : g_pages[i];
+            if (!strcmp(name, cur_name)) {
+                g_cur = i;
+                return;
+            }
+        }
+    }
+    if (g_cur >= g_npages) g_cur = g_npages - 1;
+    if (g_cur < 0) g_cur = 0;
 }
 
 /* ---- value formatting ---- */
@@ -711,6 +753,8 @@ static void load_conf(void)
         else if (sscanf(line, "show_batpct=%d", &v) == 1) g_show_batpct = !!v;
         else if (sscanf(line, "autooff=%d", &v) == 1)    g_autooff_ms = v;
         else if (sscanf(line, "refresh_ms=%d", &v) == 1) g_refresh_ms = normalize_refresh_ms(v);
+        else if (sscanf(line, "sig_read=%d", &v) == 1)   g_sig_read = !!v;
+        else if (sscanf(line, "sig_parse=%d", &v) == 1)  g_sig_parse = !!v;
         else if (sscanf(line, "bright=%d", &v) == 1)     g_saved_bright = v;
     }
     fclose(fp);
@@ -719,29 +763,60 @@ static void save_conf(void)
 {
     FILE *fp = fopen(CONF_FILE, "w");
     if (!fp) return;
-    fprintf(fp, "theme=%d\nspeed_bits=%d\nshow_batpct=%d\nautooff=%d\nrefresh_ms=%d\nbright=%d\n",
-            g_theme, g_speed_bits, g_show_batpct, g_autooff_ms, g_refresh_ms, backlight_get());
+    fprintf(fp,
+            "theme=%d\nspeed_bits=%d\nshow_batpct=%d\nautooff=%d\nrefresh_ms=%d\nsig_read=%d\nsig_parse=%d\nbright=%d\n",
+            g_theme, g_speed_bits, g_show_batpct, g_autooff_ms, g_refresh_ms,
+            g_sig_read, g_sig_parse, backlight_get());
     fclose(fp);
+}
+
+static int nr_arfcn_is_macro_mainland(long arfcn)
+{
+    static const long macro_arfcn[] = {
+        428910, 176190, 190830, 152650, 504990, 524910,
+        620640, 627264, 633984, 723360, 721824
+    };
+
+    for (size_t i = 0; i < sizeof(macro_arfcn) / sizeof(macro_arfcn[0]); i++)
+        if (arfcn == macro_arfcn[i])
+            return 1;
+    return 0;
+}
+
+static int nr_hsr_freq_hint(int mcc, const char *arfcn)
+{
+    char *end = NULL;
+    long v;
+
+    if (mcc != 460 || !arfcn || !arfcn[0] || !strcmp(arfcn, "-"))
+        return 0;
+    v = strtol(arfcn, &end, 10);
+    if (end == arfcn || v <= 0)
+        return 0;
+    return !nr_arfcn_is_macro_mainland(v);
 }
 
 /* Append one carrier card (band/bw + PCI, then RSRP/SINR colored by quality).
  * A carrier reporting the floor sentinel (RSRP <= -140) is "configured but not
  * active"; its values are grayed out and tagged inactive. */
 static int car_row(char *buf, int o, int cap, const char *band, const char *bw,
-                   const char *arfcn, const char *pci, const char *rsrp, const char *sinr)
+                   const char *arfcn, const char *pci, const char *rsrp, const char *sinr,
+                   int hsr_hint)
 {
     double rp = atof(rsrp), sn = atof(sinr);
     int inactive = rp <= -140.0;
     const char *rq = inactive ? "q-off" : rp >= -85 ? "q-good" : rp >= -105 ? "q-mid" : "q-bad";
     const char *sq = inactive ? "q-off" : sn >= 13  ? "q-good" : sn >= 0    ? "q-mid" : "q-bad";
     const char *tag = inactive ? "<span class='coff'>未激活</span>" : "";
+    const char *hsr = hsr_hint ? "<span class='chsr'>高铁专网</span>" : "";
     const char *al = (band[0] == 'n') ? "ARFCN" : "EARFCN";   /* NR vs LTE */
     return o + snprintf(buf + o, cap - o,
-        "<div class='ccd%s'><span class='cb'>%s</span><span class='cbw'> %sM</span>%s"
+        "<div class='ccd%s%s'><span class='cb'>%s</span><span class='cbw'> %sM</span>%s%s"
         "<span class='cinfo'><span class='carfcn'>%s %s</span><span class='cpci'>PCI %s</span></span>"
         "<div class='cm'><span class='ml'>RSRP</span><span class='%s'>%s</span>"
         "<span class='ml ml2'>SINR</span><span class='%s'>%s</span></div></div>",
-        inactive ? " off" : "", band, (bw && bw[0]) ? bw : "-", tag,
+        inactive ? " off" : "", hsr_hint ? " hsrhint" : "",
+        band, (bw && bw[0]) ? bw : "-", tag, hsr,
         al, (arfcn && arfcn[0]) ? arfcn : "-", (pci && pci[0]) ? pci : "-",
         rq, (rsrp && rsrp[0]) ? rsrp : "-", sq, (sinr && sinr[0]) ? sinr : "-");
 }
@@ -1105,7 +1180,7 @@ static void render_charge_boot(drm_disp_t *disp)
     maybe_dump_fb(disp);
 }
 
-static int  g_modal;           /* 0 none, 1 SA, 2 NSA, 3 LTE (second-level dialog) */
+static int  g_modal;           /* 0 none, 1 SA, 2 NSA, 3 LTE, 4 signal settings */
 static int  g_segdrag;         /* dragging the segmented control (suppress cell highlight) */
 static char g_toast[48];       /* toast message ("" = hidden) */
 static uint32_t g_toast_until; /* millis the toast hides at */
@@ -1176,20 +1251,743 @@ static const struct { const char *v, *lab; } g_netmodes[4] = {
 static const struct { int ms; const char *lab; } g_autooffs[6] = {
     { 0, "关" }, { 30000, "30秒" }, { 60000, "1分" },
     { 120000, "2分" }, { 300000, "5分" }, { 600000, "10分" } };
-static const struct { int ms; const char *lab; } g_refresh_rates[4] = {
-    { 0, "停止" }, { 1000, "1s" }, { 2000, "2s" }, { 5000, "5s" } };
+static const struct { int ms; const char *lab; } g_refresh_rates[5] = {
+    { 0, "停止" }, { 500, "0.5s" }, { 1000, "1s" }, { 2000, "2s" }, { 5000, "5s" } };
 static int normalize_refresh_ms(int ms)
 {
     switch (ms) {
     case 0:
+    case 500:
     case 1000:
     case 2000:
     case 5000:
         return ms;
-    case 500:
     default:
         return 1000;
     }
+}
+
+static int datad_set_refresh_ms(int ms)
+{
+    char cmd[192];
+
+    ms = normalize_refresh_ms(ms);
+    if (snprintf(cmd, sizeof cmd,
+                 "/usr/bin/wget -qO- --post-data='' 'http://%s:%d/modem/control?poll_ms=%d' >/dev/null 2>&1",
+                 DATAD_HTTP_ADDR, DATAD_HTTP_PORT, ms) >= (int)sizeof cmd)
+        return -1;
+    return system(cmd) == 0 ? 0 : -1;
+}
+
+static int datad_set_signal_read(int on)
+{
+    char cmd[224];
+    int active = on || g_sig_parse;
+
+    if (snprintf(cmd, sizeof cmd,
+                 "/usr/bin/wget -qO- --post-data='' 'http://%s:%d/modem/control?ml1_raw=%d&active=%d' >/dev/null 2>&1",
+                 DATAD_HTTP_ADDR, DATAD_HTTP_PORT, on ? 1 : 0, active ? 1 : 0) >= (int)sizeof cmd)
+        return -1;
+    return system(cmd) == 0 ? 0 : -1;
+}
+
+static int datad_set_signal_parse(int on)
+{
+    char cmd[256];
+    int active = g_sig_read || on;
+
+    if (snprintf(cmd, sizeof cmd,
+                 "/usr/bin/wget -qO- --post-data='' 'http://%s:%d/modem/control?lte=%d&nr=%d&active=%d' >/dev/null 2>&1",
+                 DATAD_HTTP_ADDR, DATAD_HTTP_PORT, on ? 1 : 0, on ? 1 : 0, active ? 1 : 0) >= (int)sizeof cmd)
+        return -1;
+    return system(cmd) == 0 ? 0 : -1;
+}
+
+static int modem_request_network_rescan(void)
+{
+    char cmd[512];
+
+    if (snprintf(cmd, sizeof cmd,
+                 "(/usr/bin/wget -qO- --post-data='' 'http://%s:%d/modem/control?ml1_raw=1&lte=1&nr=1&active=1&poll_ms=500' >/dev/null 2>&1; "
+                 "/usr/bin/ubus call zte_nwinfo_api nwinfo_scan_nbr '{}' >/dev/null 2>&1; "
+                 "/usr/bin/ubus call zte_nwinfo_api nwinfo_get_netinfo '{}' >/dev/null 2>&1) >/dev/null 2>&1 &",
+                 DATAD_HTTP_ADDR, DATAD_HTTP_PORT) >= (int)sizeof cmd)
+        return -1;
+    return system(cmd) == 0 ? 0 : -1;
+}
+
+#define SIGNAL_CACHE_PATH "/data/plugins/u60pro-devui/signal.cache"
+
+static int signal_cache_get(const char *key, char *dst, size_t cap)
+{
+    FILE *fp;
+    char line[192];
+    size_t key_len;
+    int found = 0;
+
+    if (!key || !dst || cap == 0)
+        return 0;
+    key_len = strlen(key);
+    fp = fopen(SIGNAL_CACHE_PATH, "r");
+    if (!fp)
+        return 0;
+    while (fgets(line, sizeof line, fp)) {
+        char *v;
+        char *e;
+
+        if (strncmp(line, key, key_len) || line[key_len] != '=')
+            continue;
+        v = line + key_len + 1;
+        e = v + strlen(v);
+        while (e > v && (e[-1] == '\n' || e[-1] == '\r' || e[-1] == ' '))
+            *--e = '\0';
+        if (*v) {
+            snprintf(dst, cap, "%s", v);
+            found = 1;
+        }
+    }
+    fclose(fp);
+    return found;
+}
+
+static void signal_cache_put(const char *key, const char *value)
+{
+    FILE *fp;
+    char old[128];
+
+    if (!key || !value || !value[0] || !strcmp(value, "-") ||
+        !strcmp(value, "已关闭"))
+        return;
+    if (signal_cache_get(key, old, sizeof old) && !strcmp(old, value))
+        return;
+    fp = fopen(SIGNAL_CACHE_PATH, "a");
+    if (!fp)
+        return;
+    fprintf(fp, "%s=%s\n", key, value);
+    fclose(fp);
+}
+
+struct signal_bundle {
+    char cell_key[64];
+    char ta[32];
+    char lte_ta[32];
+    char lte_rrc[128];
+    char lte_nas[128];
+    char lte_mcs[32];
+    char lte_modulation[32];
+    char lte_rb[32];
+    char lte_grants[32];
+    char lte_bler[32];
+    char lte_pusch[96];
+    char lte_pucch[96];
+    char nr_ta[32];
+    char nr_rrc[128];
+    char nr_nas[128];
+    char nr_mcs[32];
+    char nr_modulation[32];
+    char nr_mimo[64];
+    char nr_layers[32];
+    char nr_dl_rb[32];
+    char nr_dl_grants[32];
+    char nr_ul_rb[32];
+    char nr_ul_grants[32];
+    char nr_bler[32];
+    char nr_pusch[96];
+    char nr_pucch[96];
+    char nr_ports[64];
+    char nr_beam[128];
+    char nr_serving_ssb[32];
+    char nr_vendor[64];
+};
+
+static void signal_bundle_reset(struct signal_bundle *b)
+{
+    if (!b) return;
+    snprintf(b->cell_key, sizeof b->cell_key, "-");
+    snprintf(b->ta, sizeof b->ta, "-");
+    snprintf(b->lte_ta, sizeof b->lte_ta, "-");
+    snprintf(b->lte_rrc, sizeof b->lte_rrc, "-");
+    snprintf(b->lte_nas, sizeof b->lte_nas, "-");
+    snprintf(b->lte_mcs, sizeof b->lte_mcs, "-");
+    snprintf(b->lte_modulation, sizeof b->lte_modulation, "-");
+    snprintf(b->lte_rb, sizeof b->lte_rb, "-");
+    snprintf(b->lte_grants, sizeof b->lte_grants, "-");
+    snprintf(b->lte_bler, sizeof b->lte_bler, "-");
+    snprintf(b->lte_pusch, sizeof b->lte_pusch, "-");
+    snprintf(b->lte_pucch, sizeof b->lte_pucch, "-");
+    snprintf(b->nr_ta, sizeof b->nr_ta, "-");
+    snprintf(b->nr_rrc, sizeof b->nr_rrc, "-");
+    snprintf(b->nr_nas, sizeof b->nr_nas, "-");
+    snprintf(b->nr_mcs, sizeof b->nr_mcs, "-");
+    snprintf(b->nr_modulation, sizeof b->nr_modulation, "-");
+    snprintf(b->nr_mimo, sizeof b->nr_mimo, "-");
+    snprintf(b->nr_layers, sizeof b->nr_layers, "-");
+    snprintf(b->nr_dl_rb, sizeof b->nr_dl_rb, "-");
+    snprintf(b->nr_dl_grants, sizeof b->nr_dl_grants, "-");
+    snprintf(b->nr_ul_rb, sizeof b->nr_ul_rb, "-");
+    snprintf(b->nr_ul_grants, sizeof b->nr_ul_grants, "-");
+    snprintf(b->nr_bler, sizeof b->nr_bler, "-");
+    snprintf(b->nr_pusch, sizeof b->nr_pusch, "-");
+    snprintf(b->nr_pucch, sizeof b->nr_pucch, "-");
+    snprintf(b->nr_ports, sizeof b->nr_ports, "-");
+    snprintf(b->nr_beam, sizeof b->nr_beam, "-");
+    snprintf(b->nr_serving_ssb, sizeof b->nr_serving_ssb, "-");
+    snprintf(b->nr_vendor, sizeof b->nr_vendor, "-");
+}
+
+static int signal_value_present(const char *s)
+{
+    return s && s[0] && strcmp(s, "-") != 0 && strcmp(s, "已关闭") != 0;
+}
+
+static void signal_value_keep_last(char *cur, size_t cur_cap, char *sticky, size_t sticky_cap)
+{
+    if (!cur || cur_cap == 0 || !sticky || sticky_cap == 0)
+        return;
+    if (signal_value_present(cur)) {
+        snprintf(sticky, sticky_cap, "%s", cur);
+        return;
+    }
+    if (signal_value_present(sticky))
+        snprintf(cur, cur_cap, "%s", sticky);
+}
+
+static void signal_metric_get(const char *obj, const char *key, char *dst, size_t cap)
+{
+    char tmp[128];
+
+    if (!obj || !key || !dst || cap == 0)
+        return;
+    if (json_get(obj, key, tmp, sizeof tmp) && signal_value_present(tmp))
+        snprintf(dst, cap, "%s", tmp);
+}
+
+static void signal_bundle_apply_metrics(struct signal_bundle *b)
+{
+    char json[4096];
+    char lte[1024];
+    char nr[1600];
+    FILE *fp;
+    size_t n;
+    int rc;
+
+    if (!b || !g_sig_read)
+        return;
+    fp = popen("/usr/bin/wget -T 1 -qO- 'http://127.0.0.1:19460/modem/signal-metrics' 2>/dev/null", "r");
+    if (!fp)
+        return;
+    n = fread(json, 1, sizeof(json) - 1, fp);
+    rc = pclose(fp);
+    if (rc != 0 || n == 0)
+        return;
+    json[n] = 0;
+
+    signal_metric_get(json, "cell_vendor", b->nr_vendor, sizeof b->nr_vendor);
+    signal_metric_get(json, "cell_key", b->cell_key, sizeof b->cell_key);
+    signal_metric_get(json, "ta", b->ta, sizeof b->ta);
+    if (json_get(json, "lte", lte, sizeof lte)) {
+        signal_metric_get(lte, "ta", b->lte_ta, sizeof b->lte_ta);
+        signal_metric_get(lte, "mcs", b->lte_mcs, sizeof b->lte_mcs);
+        signal_metric_get(lte, "modulation", b->lte_modulation, sizeof b->lte_modulation);
+        signal_metric_get(lte, "rb", b->lte_rb, sizeof b->lte_rb);
+        signal_metric_get(lte, "grants", b->lte_grants, sizeof b->lte_grants);
+        signal_metric_get(lte, "bler_pct", b->lte_bler, sizeof b->lte_bler);
+        signal_metric_get(lte, "pusch", b->lte_pusch, sizeof b->lte_pusch);
+        signal_metric_get(lte, "pucch", b->lte_pucch, sizeof b->lte_pucch);
+    }
+    if (json_get(json, "nr", nr, sizeof nr)) {
+        signal_metric_get(nr, "ta", b->nr_ta, sizeof b->nr_ta);
+        signal_metric_get(nr, "mcs", b->nr_mcs, sizeof b->nr_mcs);
+        signal_metric_get(nr, "modulation", b->nr_modulation, sizeof b->nr_modulation);
+        signal_metric_get(nr, "mimo", b->nr_mimo, sizeof b->nr_mimo);
+        signal_metric_get(nr, "layers", b->nr_layers, sizeof b->nr_layers);
+        signal_metric_get(nr, "dl_rb", b->nr_dl_rb, sizeof b->nr_dl_rb);
+        signal_metric_get(nr, "dl_grants", b->nr_dl_grants, sizeof b->nr_dl_grants);
+        signal_metric_get(nr, "ul_rb", b->nr_ul_rb, sizeof b->nr_ul_rb);
+        signal_metric_get(nr, "ul_grants", b->nr_ul_grants, sizeof b->nr_ul_grants);
+        signal_metric_get(nr, "bler_pct", b->nr_bler, sizeof b->nr_bler);
+        signal_metric_get(nr, "pusch", b->nr_pusch, sizeof b->nr_pusch);
+        signal_metric_get(nr, "pucch", b->nr_pucch, sizeof b->nr_pucch);
+        signal_metric_get(nr, "ports", b->nr_ports, sizeof b->nr_ports);
+        signal_metric_get(nr, "ssb", b->nr_beam, sizeof b->nr_beam);
+        signal_metric_get(nr, "serving_ssb", b->nr_serving_ssb, sizeof b->nr_serving_ssb);
+    }
+    if (!signal_value_present(b->ta)) {
+        if (signal_value_present(b->nr_ta))
+            snprintf(b->ta, sizeof b->ta, "%s", b->nr_ta);
+        else if (signal_value_present(b->lte_ta))
+            snprintf(b->ta, sizeof b->ta, "%s", b->lte_ta);
+    }
+}
+
+static void signal_slot_label(const char *slot_json, char *dst, size_t cap)
+{
+    char data[8192];
+    char decoded[8192];
+    char message[1024];
+    char name[256];
+    char scope[256];
+    char summary[256];
+
+    if (!dst || cap == 0) return;
+    if (!slot_json || !slot_json[0] || !strncmp(slot_json, "null", 4)) {
+        snprintf(dst, cap, "-");
+        return;
+    }
+    if (json_get(slot_json, "data", data, sizeof data)) {
+        if (json_get(data, "decoded", decoded, sizeof decoded)) {
+            if (json_get(decoded, "message", message, sizeof message) && message[0]) {
+                if (message[0] == '{') {
+                    if (json_get(message, "name", name, sizeof name) && name[0]) {
+                        snprintf(dst, cap, "%s", name);
+                        return;
+                    }
+                } else {
+                    snprintf(dst, cap, "%s", message);
+                    return;
+                }
+            }
+            if (json_get(decoded, "scope", scope, sizeof scope) && scope[0]) {
+                snprintf(dst, cap, "%s", scope);
+                return;
+            }
+        }
+        if (json_get(data, "summary", summary, sizeof summary) && summary[0]) {
+            snprintf(dst, cap, "%s", summary);
+            return;
+        }
+    }
+    snprintf(dst, cap, "-");
+}
+
+static int json_pick_scalar_string(const char *obj, const char *const *keys, size_t nkeys,
+                                   char *dst, size_t cap);
+static int fetch_signal_raw_field(const char *kind, const char *const *keys, size_t nkeys,
+                                  char *dst, size_t cap);
+static int fetch_signal_raw_vendor(const char *kind, char *dst, size_t cap);
+
+static int fetch_signal_raw_int_field(const char *kind, const char *const *keys, size_t nkeys,
+                                      char *dst, size_t cap)
+{
+    char json[4096];
+    char data[3600];
+    char cmd[256];
+    FILE *fp;
+    size_t n;
+    int rc;
+
+    if (!dst || cap == 0 || !kind || !keys || nkeys == 0 || !g_sig_read)
+        return 0;
+    if (snprintf(cmd, sizeof cmd,
+                 "/usr/bin/wget -T 1 -qO- 'http://127.0.0.1:19460/modem/latest?kind=%s' 2>/dev/null",
+                 kind) >= (int)sizeof cmd)
+        return 0;
+
+    fp = popen(cmd, "r");
+    if (!fp) return 0;
+    n = fread(json, 1, sizeof json - 1, fp);
+    rc = pclose(fp);
+    if (rc != 0 || n == 0) return 0;
+    json[n] = 0;
+    if (!json_get(json, "data", data, sizeof data))
+        return 0;
+
+    for (size_t i = 0; i < nkeys; i++) {
+        long v = json_get_int(data, keys[i], -2147483647L);
+        if (v != -2147483647L) {
+            snprintf(dst, cap, "%ld", v);
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static int signal_key_tail_is_boundary(char c)
+{
+    return !((c >= 'A' && c <= 'Z') ||
+             (c >= 'a' && c <= 'z') ||
+             (c >= '0' && c <= '9') ||
+             c == '_' || c == '-');
+}
+
+static int signal_parse_deltaf_number(const char *p, int *out)
+{
+    int sign = 1;
+    int v = 0;
+    int any = 0;
+
+    if (!p || !out)
+        return 0;
+    if (*p == '-') {
+        sign = -1;
+        p++;
+    }
+    while (*p >= '0' && *p <= '9') {
+        any = 1;
+        v = v * 10 + (*p - '0');
+        p++;
+    }
+    if (!any)
+        return 0;
+    *out = sign * v;
+    return 1;
+}
+
+static int signal_extract_deltaf_value(const char *text, const char *key, int *out)
+{
+    const size_t key_len = strlen(key);
+    const char *p;
+
+    if (!text || !key || !out)
+        return 0;
+    for (p = strstr(text, key); p; p = strstr(p + 1, key)) {
+        const char *q;
+        const char *limit;
+        const char *v;
+        const char *colon;
+
+        if (!signal_key_tail_is_boundary(p[key_len]))
+            continue;
+        q = p + key_len;
+        limit = q + 160;
+        v = strstr(q, "deltaF");
+        if (v && v < limit && signal_parse_deltaf_number(v + 6, out))
+            return 1;
+        colon = strchr(q, ':');
+        if (!colon || colon >= limit)
+            continue;
+        colon++;
+        while (*colon == ' ' || *colon == '\t' || *colon == '"' || *colon == '\\')
+            colon++;
+        if (signal_parse_deltaf_number(colon, out))
+            return 1;
+    }
+    return 0;
+}
+
+static int signal_detect_vendor_from_text(const char *text, char *dst, size_t cap)
+{
+    static const char *const keys[5] = {
+        "deltaF-PUCCH-Format1",
+        "deltaF-PUCCH-Format1b",
+        "deltaF-PUCCH-Format2",
+        "deltaF-PUCCH-Format2a",
+        "deltaF-PUCCH-Format2b"
+    };
+    int v[5];
+
+    if (!text || !dst || cap == 0)
+        return 0;
+    if (signal_extract_deltaf_value(text, keys[0], &v[0]) &&
+        signal_extract_deltaf_value(text, keys[1], &v[1]) &&
+        signal_extract_deltaf_value(text, keys[2], &v[2]) &&
+        signal_extract_deltaf_value(text, keys[3], &v[3]) &&
+        signal_extract_deltaf_value(text, keys[4], &v[4])) {
+        if (v[0] == 0 && v[1] == 3 && v[2] == 0 && v[3] == 0 && v[4] == 0)
+            snprintf(dst, cap, "Ericsson");
+        else if (v[0] == 0 && v[1] == 3 && v[2] == 1 && v[3] == 2 && v[4] == 2)
+            snprintf(dst, cap, "Huawei");
+        else if (v[0] == 0 && v[1] == 1 && v[2] == 0 && v[3] == 0 && v[4] == 0)
+            snprintf(dst, cap, "Nokia");
+        else if (v[0] == 2 && v[1] == 3 && v[2] == 1 && v[3] == 2 && v[4] == 2)
+            snprintf(dst, cap, "ZTE");
+        else
+            return 0;
+        return 1;
+    }
+    if (strstr(text, "maxCarriersRequestedDL") &&
+        strstr(text, "maxCarriersRequestedUL")) {
+        snprintf(dst, cap, "Huawei");
+        return 1;
+    }
+    return 0;
+}
+
+static int fetch_signal_bundle(struct signal_bundle *out)
+{
+    static uint32_t cached_at;
+    static int cached_valid;
+    static struct signal_bundle cached;
+    char json[16384];
+    char slot[8192];
+    char data[8192];
+    char decoded[8192];
+    uint32_t now = millis();
+    FILE *fp;
+    size_t n;
+    int rc;
+    static const char *const nr_port_keys[] = {
+        "csi_rs_ports", "csi_rs_nrof_ports", "nrofPorts", "ports", "num_ports"
+    };
+    static const char *const nr_ssb_keys[] = {
+        "ssb_positions_in_burst_active", "ssb_positions_in_burst", "ssb_index",
+        "csi_ssb_resource_set", "ssb_positions_in_burst_short_bitmap",
+        "ssb_positions_in_burst_medium_bitmap", "ssb_positions_in_burst_long_bitmap"
+    };
+
+    if (out) signal_bundle_reset(out);
+    if (cached_at && (uint32_t)(now - cached_at) < 900) {
+        if (out) *out = cached;
+        return cached_valid;
+    }
+
+    cached_at = now;
+    cached_valid = 0;
+    signal_bundle_reset(&cached);
+    fp = popen("/usr/bin/wget -T 1 -qO- 'http://127.0.0.1:19460/modem/latest-signals' 2>/dev/null", "r");
+    if (!fp) {
+        if (out) *out = cached;
+        return 0;
+    }
+    n = fread(json, 1, sizeof(json) - 1, fp);
+    rc = pclose(fp);
+    if (rc == 0 && n > 0) {
+        json[n] = 0;
+        if (json_get(json, "lte_rrc", slot, sizeof slot)) {
+            signal_slot_label(slot, cached.lte_rrc, sizeof cached.lte_rrc);
+            if (json_get(slot, "data", data, sizeof data)) {
+                if (json_get(data, "decoded", decoded, sizeof decoded))
+                    (void)signal_detect_vendor_from_text(decoded, cached.nr_vendor, sizeof cached.nr_vendor);
+                if (!signal_value_present(cached.nr_vendor))
+                    (void)signal_detect_vendor_from_text(data, cached.nr_vendor, sizeof cached.nr_vendor);
+            }
+        }
+        if (json_get(json, "lte_nas", slot, sizeof slot)) signal_slot_label(slot, cached.lte_nas, sizeof cached.lte_nas);
+        if (json_get(json, "nr_rrc", slot, sizeof slot)) {
+            signal_slot_label(slot, cached.nr_rrc, sizeof cached.nr_rrc);
+            if (json_get(slot, "data", data, sizeof data)) {
+                if (json_get(data, "decoded", decoded, sizeof decoded)) {
+                    (void)json_pick_scalar_string(decoded, nr_port_keys,
+                                                  sizeof nr_port_keys / sizeof nr_port_keys[0],
+                                                  cached.nr_ports, sizeof cached.nr_ports);
+                    (void)json_pick_scalar_string(decoded, nr_ssb_keys,
+                                                  sizeof nr_ssb_keys / sizeof nr_ssb_keys[0],
+                                                  cached.nr_beam, sizeof cached.nr_beam);
+                    (void)signal_detect_vendor_from_text(decoded, cached.nr_vendor, sizeof cached.nr_vendor);
+                }
+                if (!strcmp(cached.nr_ports, "-")) {
+                    (void)json_pick_scalar_string(data, nr_port_keys,
+                                                  sizeof nr_port_keys / sizeof nr_port_keys[0],
+                                                  cached.nr_ports, sizeof cached.nr_ports);
+                }
+                if (!strcmp(cached.nr_beam, "-")) {
+                    (void)json_pick_scalar_string(data, nr_ssb_keys,
+                                                  sizeof nr_ssb_keys / sizeof nr_ssb_keys[0],
+                                                  cached.nr_beam, sizeof cached.nr_beam);
+                }
+                if (!strcmp(cached.nr_ports, "-")) {
+                    fetch_signal_raw_field("nr_rrc_full&scope=rrc_reconfiguration",
+                                           nr_port_keys,
+                                           sizeof nr_port_keys / sizeof nr_port_keys[0],
+                                           cached.nr_ports, sizeof cached.nr_ports);
+                }
+                if (!strcmp(cached.nr_beam, "-")) {
+                    fetch_signal_raw_field("nr_rrc_full&scope=rrc_reconfiguration",
+                                           nr_ssb_keys,
+                                           sizeof nr_ssb_keys / sizeof nr_ssb_keys[0],
+                                           cached.nr_beam, sizeof cached.nr_beam);
+                }
+                if (!signal_value_present(cached.nr_vendor))
+                    (void)signal_detect_vendor_from_text(data, cached.nr_vendor, sizeof cached.nr_vendor);
+            }
+        }
+        if (json_get(json, "nr_nas", slot, sizeof slot)) signal_slot_label(slot, cached.nr_nas, sizeof cached.nr_nas);
+        signal_bundle_apply_metrics(&cached);
+        if (!signal_value_present(cached.nr_vendor)) {
+            if (!fetch_signal_raw_vendor("lte_rrc_full&scope=rrc_system_information",
+                                         cached.nr_vendor, sizeof cached.nr_vendor) &&
+                !fetch_signal_raw_vendor("lte_rrc_full&scope=rrc_capability_enquiry",
+                                         cached.nr_vendor, sizeof cached.nr_vendor))
+                (void)fetch_signal_raw_vendor("nr_rrc_full&scope=rrc_capability_enquiry",
+                                              cached.nr_vendor, sizeof cached.nr_vendor);
+        }
+        cached_valid = 1;
+    }
+    if (out) *out = cached;
+    return cached_valid;
+}
+
+static int json_pick_int_string(const char *obj, const char *const *keys, size_t nkeys,
+                                char *dst, size_t cap)
+{
+    const long miss = -2147483647L;
+
+    if (!dst || cap == 0) return 0;
+    for (size_t i = 0; i < nkeys; i++) {
+        long v = json_get_int(obj, keys[i], miss);
+        if (v != miss) {
+            snprintf(dst, cap, "%ld", v);
+            return 1;
+        }
+    }
+    snprintf(dst, cap, "-");
+    return 0;
+}
+
+static int json_pick_scalar_string(const char *obj, const char *const *keys, size_t nkeys,
+                                   char *dst, size_t cap)
+{
+    char tmp[512];
+
+    if (!dst || cap == 0) return 0;
+    for (size_t i = 0; i < nkeys; i++) {
+        if (json_get(obj, keys[i], tmp, sizeof tmp) && tmp[0]) {
+            snprintf(dst, cap, "%s", tmp);
+            return 1;
+        }
+    }
+    return json_pick_int_string(obj, keys, nkeys, dst, cap);
+}
+
+static int fetch_signal_raw_field(const char *kind, const char *const *keys, size_t nkeys,
+                                  char *dst, size_t cap)
+{
+    char cmd[256];
+    char json[4096];
+    char data[3600];
+    char decoded[3200];
+    FILE *fp;
+    size_t n;
+    int rc;
+
+    if (!dst || cap == 0) return 0;
+    snprintf(dst, cap, "-");
+    if (!g_sig_read) return 0;
+    if (snprintf(cmd, sizeof cmd,
+                 "/usr/bin/wget -T 1 -qO- 'http://127.0.0.1:19460/modem/latest?kind=%s' 2>/dev/null",
+                 kind) >= (int)sizeof cmd)
+        return 0;
+    fp = popen(cmd, "r");
+    if (!fp) return 0;
+    n = fread(json, 1, sizeof(json) - 1, fp);
+    rc = pclose(fp);
+    if (rc != 0 || n == 0) return 0;
+    json[n] = 0;
+    if (!strncmp(json, "null", 4)) return 0;
+    if (!json_get(json, "data", data, sizeof data)) return 0;
+    if (json_get(data, "decoded", decoded, sizeof decoded) &&
+        json_pick_scalar_string(decoded, keys, nkeys, dst, cap))
+        return 1;
+    return json_pick_scalar_string(data, keys, nkeys, dst, cap);
+}
+
+static int json_scan_last_scalar_string(const char *json, const char *const *keys, size_t nkeys,
+                                        char *dst, size_t cap)
+{
+    char needle[128];
+
+    if (!json || !dst || cap == 0) return 0;
+    for (size_t i = 0; i < nkeys; i++) {
+        const char *p = json;
+        char last[256] = "";
+        int found = 0;
+
+        if (snprintf(needle, sizeof needle, "\"%s\":", keys[i]) >= (int)sizeof needle)
+            continue;
+        while ((p = strstr(p, needle)) != NULL) {
+            const char *v = p + strlen(needle);
+            char tmp[256];
+            size_t o = 0;
+
+            while (*v == ' ' || *v == '\t' || *v == '\r' || *v == '\n')
+                v++;
+            if (*v == '"') {
+                v++;
+                while (*v && o + 1 < sizeof tmp) {
+                    if (*v == '\\' && v[1]) {
+                        v++;
+                        tmp[o++] = *v++;
+                        continue;
+                    }
+                    if (*v == '"')
+                        break;
+                    tmp[o++] = *v++;
+                }
+            } else {
+                while (*v && *v != ',' && *v != '}' && *v != ']' &&
+                       *v != ' ' && *v != '\t' && *v != '\r' && *v != '\n' &&
+                       o + 1 < sizeof tmp)
+                    tmp[o++] = *v++;
+            }
+            tmp[o] = 0;
+            if (tmp[0] && strcmp(tmp, "null") != 0) {
+                snprintf(last, sizeof last, "%s", tmp);
+                found = 1;
+            }
+            p += strlen(needle);
+        }
+        if (found) {
+            snprintf(dst, cap, "%s", last);
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static int fetch_signal_recent_raw_field(const char *kind, const char *const *keys, size_t nkeys,
+                                         char *dst, size_t cap)
+{
+    char cmd[256];
+    static char json[65536];
+    FILE *fp;
+    size_t n;
+    int rc;
+
+    if (!dst || cap == 0) return 0;
+    if (!g_sig_read) return 0;
+    if (snprintf(cmd, sizeof cmd,
+                 "/usr/bin/wget -T 1 -qO- 'http://127.0.0.1:19460/modem/recent?kind=%s&limit=96' 2>/dev/null",
+                 kind) >= (int)sizeof cmd)
+        return 0;
+    fp = popen(cmd, "r");
+    if (!fp) return 0;
+    n = fread(json, 1, sizeof(json) - 1, fp);
+    rc = pclose(fp);
+    if (rc != 0 || n == 0) return 0;
+    json[n] = 0;
+    return json_scan_last_scalar_string(json, keys, nkeys, dst, cap);
+}
+
+static int fetch_signal_raw_vendor(const char *kind, char *dst, size_t cap)
+{
+    char cmd[256];
+    char json[4096];
+    char data[3600];
+    char decoded[3200];
+    FILE *fp;
+    size_t n;
+    int rc;
+
+    if (!dst || cap == 0 || !g_sig_read)
+        return 0;
+    if (snprintf(cmd, sizeof cmd,
+                 "/usr/bin/wget -T 1 -qO- 'http://127.0.0.1:19460/modem/latest?kind=%s' 2>/dev/null",
+                 kind) >= (int)sizeof cmd)
+        return 0;
+    fp = popen(cmd, "r");
+    if (!fp)
+        return 0;
+    n = fread(json, 1, sizeof(json) - 1, fp);
+    rc = pclose(fp);
+    if (rc != 0 || n == 0)
+        return 0;
+    json[n] = 0;
+    if (!strncmp(json, "null", 4))
+        return 0;
+    if (!json_get(json, "data", data, sizeof data))
+        return 0;
+    if (json_get(data, "decoded", decoded, sizeof decoded) &&
+        signal_detect_vendor_from_text(decoded, dst, cap))
+        return 1;
+    return signal_detect_vendor_from_text(data, dst, cap);
+}
+
+static void signal_settings_summary(char *dst, size_t cap)
+{
+    if (!dst || cap == 0) return;
+    snprintf(dst, cap, "读取 %s · 解析 %s",
+             g_sig_read ? "已开启" : "已关闭",
+             g_sig_parse ? "已开启" : "已关闭");
 }
 /* escape &,<,> for safe litehtml parsing of arbitrary SMS text */
 static void html_esc(char *dst, size_t cap, const char *src)
@@ -1221,6 +2019,67 @@ static void utf8_trunc(char *dst, size_t cap, const char *src, int maxb, int *cu
     dst[o] = 0;
 }
 
+static void signal_ui_compact(char *dst, size_t cap, const char *src)
+{
+    int cut = 0;
+
+    if (!dst || cap == 0) return;
+    if (!src || !src[0]) {
+        snprintf(dst, cap, "-");
+        return;
+    }
+
+    if (strstr(src, "rrc_reconfiguration_complete") || strstr(src, "RRCReconfigurationComplete"))
+        snprintf(dst, cap, "RRC重配完成");
+    else if (strstr(src, "rrc_reconfiguration") || strstr(src, "RRCReconfiguration"))
+        snprintf(dst, cap, "RRC重配");
+    else if (strstr(src, "rrc_setup_complete") || strstr(src, "RRCSetupComplete"))
+        snprintf(dst, cap, "RRC建立完成");
+    else if (strstr(src, "rrc_setup") || strstr(src, "RRCSetup"))
+        snprintf(dst, cap, "RRC建立");
+    else if (strstr(src, "ueCapabilityEnquiry") || strstr(src, "rrc_capability_enquiry"))
+        snprintf(dst, cap, "UE能力查询");
+    else if (strstr(src, "ueCapabilityInformation") || strstr(src, "rrc_capability_information"))
+        snprintf(dst, cap, "UE能力上报");
+    else if (strstr(src, "SystemInformation") || strstr(src, "rrc_system_information"))
+        snprintf(dst, cap, "系统信息");
+    else if (strstr(src, "MasterInformationBlock") || strstr(src, "rrc_mib"))
+        snprintf(dst, cap, "MIB");
+    else if (strstr(src, "securityModeCommand"))
+        snprintf(dst, cap, "安全模式命令");
+    else if (strstr(src, "securityModeComplete"))
+        snprintf(dst, cap, "安全模式完成");
+    else if (strstr(src, "registration_accept"))
+        snprintf(dst, cap, "注册接受");
+    else if (strstr(src, "registration_request"))
+        snprintf(dst, cap, "注册请求");
+    else if (strstr(src, "service_request"))
+        snprintf(dst, cap, "业务请求");
+    else {
+        utf8_trunc(dst, cap, src, 18, &cut);
+        if (cut && strlen(dst) + 3 < cap)
+            strcat(dst, "...");
+    }
+}
+
+static void signal_bler_compact(char *dst, size_t cap, const char *src)
+{
+    char *endp = NULL;
+    double v;
+
+    if (!dst || cap == 0) return;
+    if (!src || !src[0]) {
+        snprintf(dst, cap, "-");
+        return;
+    }
+    v = strtod(src, &endp);
+    if (endp && endp != src && *endp == '\0') {
+        snprintf(dst, cap, "%.1f%%", v);
+        return;
+    }
+    signal_ui_compact(dst, cap, src);
+}
+
 /* Second-level SMS detail dialog (number + date + full text), overlaid dimmed. */
 static const char *sms_modal_html(void)
 {
@@ -1244,6 +2103,23 @@ static const char *modal_html(void)
 {
     static char out[3200];
     const char *uni, *sel, *pfx, *title, *act;
+    if (g_modal == 4) {
+        snprintf(out, sizeof out,
+            "<!DOCTYPE html><html><head><meta charset='UTF-8'><link rel='stylesheet' href='style.css'></head>"
+            "<body class='mo'><div class='modal %s'>"
+            "<div class='mtitle'>高级设置</div>"
+            "<a href='act:sigread' class='row'><span class='lab'>读取信令<span class='st'>控制 ML1 / 原始信令读取，影响 TA / Ports / Beam</span></span>"
+            "<span class='ctrl'><span class='sw %s'><span class='kn'></span></span></span></a>"
+            "<a href='act:sigparse' class='row'><span class='lab'>解析信令<span class='st'>控制 LTE / NR RRC / NAS 解析，并决定第二页是否显示</span></span>"
+            "<span class='ctrl'><span class='sw %s'><span class='kn'></span></span></span></a>"
+            "<div class='sec'>开启解析后才显示第二页。读取关闭时，TA / Ports / SSB Index 会显示为空。</div>"
+            "<div class='mbtns'><a href='act:closemodal' class='mbtn2 prim mfull'>关闭</a></div>"
+            "</div></body></html>",
+            g_theme ? "light" : "dark",
+            g_sig_read ? "on" : "off",
+            g_sig_parse ? "on" : "off");
+        return out;
+    }
     if (g_modal == 1)      { uni = g_uni_sa;  sel = g_sel_sa;  pfx = "n"; act = "bsa";  title = "5G SA 锁频"; }
     else if (g_modal == 2) { uni = g_uni_nsa; sel = g_sel_nsa; pfx = "n"; act = "bnsa"; title = "5G NSA 锁频"; }
     else                   { uni = g_uni_lte; sel = g_sel_lte; pfx = "B"; act = "blte"; title = "4G 锁频"; }
@@ -1261,9 +2137,144 @@ static const char *modal_html(void)
         g_theme ? "light" : "dark", title, chips);
     return out;
 }
+
+static int fetch_lte_ta(int *ta_out)
+{
+    static uint32_t cached_at;
+    static uint32_t enable_req_at;
+    static int cached_valid;
+    static int cached_ta = -1;
+    char json[2048];
+    char data[1800];
+    char cmd[192];
+    uint32_t now = millis();
+    FILE *fp;
+    size_t n;
+    int rc;
+    int fresh_ta = -1;
+
+    if (ta_out) *ta_out = -1;
+    if (!g_sig_read) return 0;
+    if (cached_ta < 0) {
+        char cached_text[24];
+        if (signal_cache_get("ta", cached_text, sizeof cached_text)) {
+            char *endp = NULL;
+            long v = strtol(cached_text, &endp, 10);
+
+            if (endp && *endp == '\0' && v >= 0 && v <= 4096) {
+                cached_ta = (int)v;
+                cached_valid = 1;
+            }
+        }
+    }
+    if (cached_at && (uint32_t)(now - cached_at) < 900) {
+        if (cached_valid && ta_out) *ta_out = cached_ta;
+        return cached_valid;
+    }
+
+    cached_at = now;
+    cached_valid = cached_ta >= 0;
+    fp = popen("/usr/bin/wget -T 1 -qO- 'http://127.0.0.1:19460/modem/latest?kind=lte_ml1_raw' 2>/dev/null", "r");
+    if (fp) {
+        n = fread(json, 1, sizeof(json) - 1, fp);
+        rc = pclose(fp);
+        if (rc == 0 && n > 0) {
+            json[n] = 0;
+            if (!strncmp(json, "null", 4)) {
+                if ((uint32_t)(now - enable_req_at) >= 5000 &&
+                    snprintf(cmd, sizeof cmd,
+                            "/usr/bin/wget -qO- --post-data='' 'http://127.0.0.1:19460/modem/control?ml1_raw=1&active=1' >/dev/null 2>&1")
+                        < (int)sizeof cmd) {
+                    (void)system(cmd);
+                    enable_req_at = now;
+                }
+            } else if (json_get(json, "data", data, sizeof data)) {
+                fresh_ta = (int)json_get_int(data, "ta", -1);
+            }
+        }
+    }
+    if (fresh_ta < 0) {
+        fp = popen("/usr/bin/wget -T 1 -qO- 'http://127.0.0.1:19460/modem/recent?kind=lte_ml1_raw&log_origin=direct&limit=64' 2>/dev/null", "r");
+        if (fp) {
+            n = fread(json, 1, sizeof(json) - 1, fp);
+            rc = pclose(fp);
+            if (rc == 0 && n > 0) {
+                const char *p;
+                json[n] = 0;
+                p = json;
+                while ((p = strstr(p, "\"ta\":")) != NULL) {
+                    char *endp = NULL;
+                    long v = strtol(p + 5, &endp, 10);
+
+                    if (endp && endp != p + 5 && v >= 0 && v <= 4096)
+                        fresh_ta = (int)v;
+                    p = endp && endp > p ? endp : p + 5;
+                }
+            }
+        }
+    }
+    if (fresh_ta >= 0) {
+        char ta_text[24];
+
+        cached_ta = fresh_ta;
+        cached_valid = 1;
+        snprintf(ta_text, sizeof ta_text, "%d", fresh_ta);
+        signal_cache_put("ta", ta_text);
+    }
+    if (cached_ta < 0) return 0;
+
+    cached_valid = 1;
+    if (ta_out) *ta_out = cached_ta;
+    return 1;
+}
+
+static double nr_ta_unit_m(const devui_data_t *d, const struct signal_bundle *sig)
+{
+    long arfcn = d ? d->nr_channel : 0;
+
+    if (sig && signal_value_present(sig->cell_key)) {
+        const char *p = strrchr(sig->cell_key, ':');
+        if (p && p[1]) {
+            char *endp = NULL;
+            long v = strtol(p + 1, &endp, 10);
+            if (endp && endp != p + 1 && v > 0) arfcn = v;
+        }
+    }
+    if (arfcn >= 499200 && arfcn <= 537999) return 39.06; /* n41, 30 kHz */
+    if (arfcn >= 620000 && arfcn <= 653333) return 39.06; /* n78, 30 kHz */
+    if (arfcn >= 693334 && arfcn <= 733333) return 39.06; /* n79, 30 kHz */
+    if (d && (strstr(d->nr_band, "n41") || strstr(d->nr_band, "n77") ||
+              strstr(d->nr_band, "n78") || strstr(d->nr_band, "n79")))
+        return 39.06;
+    return 78.12;
+}
+
+static double ta_unit_m_for_signal(const devui_data_t *d, const struct signal_bundle *sig, int ta)
+{
+    if (sig && signal_value_present(sig->nr_ta)) {
+        char *endp = NULL;
+        long nr_ta = strtol(sig->nr_ta, &endp, 10);
+        if (endp && endp != sig->nr_ta && nr_ta == ta)
+            return nr_ta_unit_m(d, sig);
+    }
+    return 78.12; /* LTE / 15 kHz */
+}
+
+static void fmt_ta_distance(char *dst, size_t cap, int ta, double unit_m)
+{
+    double meters;
+
+    if (!dst || cap == 0) return;
+    if (ta < 0) { snprintf(dst, cap, "-"); return; }
+    if (unit_m <= 0.0) unit_m = 78.12;
+    meters = (double)ta * unit_m;
+    if (meters >= 1000.0) snprintf(dst, cap, "约 %.1f km", meters / 1000.0);
+    else                  snprintf(dst, cap, "约 %.0f m", meters);
+}
 /* Fill a kv table from the current device state. Buffers are static. */
 static int build_kv(struct kv *t, const char *path)
 {
+    int is_cellinfo = path && strstr(path, "cell.html") != NULL;
     int is_charts = path && strstr(path, "charts.html") != NULL;
     g_phase++;
 
@@ -1271,10 +2282,18 @@ static int build_kv(struct kv *t, const char *path)
     static char s_cellid[20], s_pci[12], s_clients[8], s_up[24], s_rxs[20], s_txs[20];
     static char s_rxb[16], s_txb[16], s_cpu[8], s_mem[8], w_rsrp[6], w_rsrq[6], w_sinr[6], w_bw[6];
     static char s_oper[48], s_ssid[64], s_key[64], s_page[8], s_np[8], s_model[64], s_fw[80];
-    static char s_qci[8], s_ambr[24], s_sbar[640], s_dots[320];
-    static char s_nrrows[1500], s_lterows[1700], s_carriers[4000], s_nr_block[2200], s_lte_block[2200], s_sigcards[5000], s_gen[8];
+    static char s_qci[8], s_ambr[24], s_sbar[640], s_dots[320], s_ta[16], s_tadist[24];
+    static char s_nrports[64], s_nrbeam[128], s_nrvendor[64], s_sigadvstate[64], s_signalcards[8000];
+    static char s_last_lte_nas[128] = "-";
+        static char s_last_nr_nas[128] = "-";
+        static char s_last_nrports[64] = "-";
+        static char s_last_nrbeam[128] = "-";
+        static char s_last_nrvendor[64] = "-";
+        static char s_nrrows[1500], s_lterows[1700], s_carriers[4000], s_nr_block[2200], s_lte_block[2200], s_sigcards[5000], s_gen[8];
 
     static devui_data_t d;
+    static struct signal_bundle sig;
+    int ta = -1;
     if (!data_refresh(&d)) memset(&d, 0, sizeof d);
     g_charging = d.charger_connect;
     snprintf(s_page, sizeof s_page, "%d", g_cur + 1);
@@ -1306,6 +2325,20 @@ static int build_kv(struct kv *t, const char *path)
     else { int kn = (int)strlen(d.wifi_key); if (kn > 16) kn = 16; memset(s_key, '*', kn); s_key[kn] = 0; }
     snprintf(s_model, sizeof s_model, "%s", d.model[0] ? d.model : "-");
     snprintf(s_fw, sizeof s_fw, "%s", d.fw[0] ? d.fw : "-");
+    if (is_cellinfo && !g_sig_read) {
+        snprintf(s_ta, sizeof s_ta, "已关闭");
+        snprintf(s_tadist, sizeof s_tadist, "已关闭");
+    } else if (is_cellinfo && fetch_lte_ta(&ta)) {
+        snprintf(s_ta, sizeof s_ta, "%d", ta);
+        fmt_ta_distance(s_tadist, sizeof s_tadist, ta, 78.12);
+    } else if (is_cellinfo) {
+        snprintf(s_ta, sizeof s_ta, "-");
+        snprintf(s_tadist, sizeof s_tadist, "-");
+    } else {
+        snprintf(s_ta, sizeof s_ta, "-");
+        snprintf(s_tadist, sizeof s_tadist, "-");
+    }
+    signal_settings_summary(s_sigadvstate, sizeof s_sigadvstate);
     snprintf(w_rsrp, sizeof w_rsrp, "%d", clampi((d.nr_rsrp + 120) * 2, 3, 100));
     snprintf(w_rsrq, sizeof w_rsrq, "%d", clampi((d.nr_rsrq + 20) * 100 / 17, 3, 100));
     snprintf(w_sinr, sizeof w_sinr, "%d", clampi((int)((atof(d.nr_snr) + 10) * 100 / 40), 3, 100));
@@ -1335,17 +2368,313 @@ static int build_kv(struct kv *t, const char *path)
     int is_lte  = !is_nsa && !is_sa && (strstr(d.net_type, "LTE") || strstr(d.net_type, "4G"));
     int show_nr  = is_sa || is_nsa || is_endc;
     int show_lte = is_nsa || is_endc || is_lte;
+    int show_nr_nas = is_sa;
     int nr_cc = 0, nr_bw = 0, lte_cc = 0, lte_bw = 0;
     int nr_show_cc = 0, nr_show_bw = 0, lte_show_cc = 0, lte_show_bw = 0, no = 0, lo = 0;
     char rp[12], pc[12], ac[16];
     const char *nr_band = d.nr_band[0] ? d.nr_band : d.band;
+
+    if (is_cellinfo) {
+        char c_lte_rrc[96], c_lte_nas[96], c_nr_rrc[96], c_nr_nas[96];
+        char c_lteta[96], c_nrta[96];
+        char c_nrports[96], c_nrbeam[96], c_nrservssb[96], c_nrbler[96], c_ltebler[96];
+        char c_nrmcs[96], c_nrmod[96], c_nrmimo[96], c_nrlayers[96], c_nrdlgrant[96], c_nrdlrb[96], c_nrulgrant[96], c_nrulrb[96], c_nrpusch[128], c_nrpucch[128];
+        char c_ltemcs[96], c_ltemod[96], c_ltegrant[96], c_lterb[96], c_ltepusch[128], c_ltepucch[128];
+        char e_lte_rrc[256], e_lte_nas[256], e_nr_rrc[256], e_nr_nas[256];
+        char e_lteta[128], e_nrta[128];
+        char e_nrports[160], e_nrbeam[256], e_nrservssb[128], e_nrbler[128], e_ltebler[128], e_nrvendor[128];
+        char e_nrmcs[128], e_nrmod[128], e_nrmimo[128], e_nrlayers[128], e_nrdlgrant[128], e_nrdlrb[128], e_nrulgrant[128], e_nrulrb[128], e_nrpusch[192], e_nrpucch[192];
+        char e_ltemcs[128], e_ltemod[128], e_ltegrant[128], e_lterb[128], e_ltepusch[192], e_ltepucch[192];
+        char s_lteta[64], s_nrta[64], s_nrservssb[64], s_nrbler[64], s_ltebler[64];
+        char s_nrmcs[64], s_nrmod[64], s_nrmimo[64], s_nrlayers[64], s_nrdlgrant[64], s_nrdlrb[64], s_nrulgrant[64], s_nrulrb[64], s_nrpusch[96], s_nrpucch[96];
+        char s_ltemcs[64], s_ltemod[64], s_ltegrant[64], s_lterb[64], s_ltepusch[96], s_ltepucch[96];
+        static char s_last_signal_cell_key[64] = "";
+        static char s_last_nrservssb[64] = "-";
+        static char s_last_nrbler[64] = "-";
+        static char s_last_ltebler[64] = "-";
+        int so = 0;
+
+        signal_bundle_reset(&sig);
+        (void)fetch_signal_bundle(&sig);
+        if (signal_value_present(sig.cell_key) &&
+            strcmp(sig.cell_key, s_last_signal_cell_key) != 0) {
+            snprintf(s_last_signal_cell_key, sizeof s_last_signal_cell_key, "%s", sig.cell_key);
+            snprintf(s_last_nrports, sizeof s_last_nrports, "-");
+            snprintf(s_last_nrbeam, sizeof s_last_nrbeam, "-");
+            snprintf(s_last_nrservssb, sizeof s_last_nrservssb, "-");
+            snprintf(s_last_nrbler, sizeof s_last_nrbler, "-");
+            snprintf(s_last_ltebler, sizeof s_last_ltebler, "-");
+            snprintf(s_last_nrvendor, sizeof s_last_nrvendor, "-");
+        }
+        signal_value_keep_last(sig.lte_nas, sizeof sig.lte_nas, s_last_lte_nas, sizeof s_last_lte_nas);
+        signal_value_keep_last(sig.nr_nas, sizeof sig.nr_nas, s_last_nr_nas, sizeof s_last_nr_nas);
+        if (!g_sig_read) {
+            snprintf(s_lteta, sizeof s_lteta, "已关闭");
+            snprintf(s_nrta, sizeof s_nrta, "已关闭");
+            snprintf(s_nrports, sizeof s_nrports, "已关闭");
+            snprintf(s_nrbeam, sizeof s_nrbeam, "已关闭");
+            snprintf(s_nrservssb, sizeof s_nrservssb, "已关闭");
+            snprintf(s_nrbler, sizeof s_nrbler, "已关闭");
+            snprintf(s_ltebler, sizeof s_ltebler, "已关闭");
+            snprintf(s_nrmcs, sizeof s_nrmcs, "已关闭");
+            snprintf(s_nrmod, sizeof s_nrmod, "已关闭");
+            snprintf(s_nrmimo, sizeof s_nrmimo, "已关闭");
+            snprintf(s_nrlayers, sizeof s_nrlayers, "已关闭");
+            snprintf(s_nrdlgrant, sizeof s_nrdlgrant, "已关闭");
+            snprintf(s_nrdlrb, sizeof s_nrdlrb, "已关闭");
+            snprintf(s_nrulgrant, sizeof s_nrulgrant, "已关闭");
+            snprintf(s_nrulrb, sizeof s_nrulrb, "已关闭");
+            snprintf(s_nrpusch, sizeof s_nrpusch, "已关闭");
+            snprintf(s_nrpucch, sizeof s_nrpucch, "已关闭");
+            snprintf(s_ltemcs, sizeof s_ltemcs, "已关闭");
+            snprintf(s_ltemod, sizeof s_ltemod, "已关闭");
+            snprintf(s_ltegrant, sizeof s_ltegrant, "已关闭");
+            snprintf(s_lterb, sizeof s_lterb, "已关闭");
+            snprintf(s_ltepusch, sizeof s_ltepusch, "已关闭");
+            snprintf(s_ltepucch, sizeof s_ltepucch, "已关闭");
+            snprintf(s_nrvendor, sizeof s_nrvendor, "-");
+        } else {
+            snprintf(s_lteta, sizeof s_lteta, "%s", sig.lte_ta);
+            snprintf(s_nrta, sizeof s_nrta, "%s", sig.nr_ta);
+            snprintf(s_nrports, sizeof s_nrports, "%s", sig.nr_ports);
+            snprintf(s_nrbeam, sizeof s_nrbeam, "%s", sig.nr_beam);
+            snprintf(s_nrservssb, sizeof s_nrservssb, "-");
+            snprintf(s_nrbler, sizeof s_nrbler, "-");
+            snprintf(s_ltebler, sizeof s_ltebler, "-");
+            snprintf(s_nrmcs, sizeof s_nrmcs, "%s", sig.nr_mcs);
+            snprintf(s_nrmod, sizeof s_nrmod, "%s", sig.nr_modulation);
+            snprintf(s_nrmimo, sizeof s_nrmimo, "%s", sig.nr_mimo);
+            snprintf(s_nrlayers, sizeof s_nrlayers, "%s", sig.nr_layers);
+            snprintf(s_nrdlgrant, sizeof s_nrdlgrant, "%s", sig.nr_dl_grants);
+            snprintf(s_nrdlrb, sizeof s_nrdlrb, "%s", sig.nr_dl_rb);
+            snprintf(s_nrulgrant, sizeof s_nrulgrant, "%s", sig.nr_ul_grants);
+            snprintf(s_nrulrb, sizeof s_nrulrb, "%s", sig.nr_ul_rb);
+            snprintf(s_nrpusch, sizeof s_nrpusch, "%s", sig.nr_pusch);
+            snprintf(s_nrpucch, sizeof s_nrpucch, "%s", sig.nr_pucch);
+            snprintf(s_ltemcs, sizeof s_ltemcs, "%s", sig.lte_mcs);
+            snprintf(s_ltemod, sizeof s_ltemod, "%s", sig.lte_modulation);
+            snprintf(s_ltegrant, sizeof s_ltegrant, "%s", sig.lte_grants);
+            snprintf(s_lterb, sizeof s_lterb, "%s", sig.lte_rb);
+            snprintf(s_ltepusch, sizeof s_ltepusch, "%s", sig.lte_pusch);
+            snprintf(s_ltepucch, sizeof s_ltepucch, "%s", sig.lte_pucch);
+            snprintf(s_nrservssb, sizeof s_nrservssb, "%s", sig.nr_serving_ssb);
+            snprintf(s_nrbler, sizeof s_nrbler, "%s", sig.nr_bler);
+            snprintf(s_ltebler, sizeof s_ltebler, "%s", sig.lte_bler);
+            snprintf(s_nrvendor, sizeof s_nrvendor, "%s", sig.nr_vendor);
+            if (!signal_value_present(sig.nr_ta))
+                snprintf(s_nrta, sizeof s_nrta, "等待ML1");
+            if (!signal_value_present(sig.lte_ta))
+                snprintf(s_lteta, sizeof s_lteta, "等待ML1");
+            signal_value_keep_last(s_nrports, sizeof s_nrports, s_last_nrports, sizeof s_last_nrports);
+            signal_value_keep_last(s_nrbeam, sizeof s_nrbeam, s_last_nrbeam, sizeof s_last_nrbeam);
+            signal_value_keep_last(s_nrservssb, sizeof s_nrservssb,
+                                   s_last_nrservssb, sizeof s_last_nrservssb);
+            signal_value_keep_last(s_nrbler, sizeof s_nrbler,
+                                   s_last_nrbler, sizeof s_last_nrbler);
+            signal_value_keep_last(s_ltebler, sizeof s_ltebler,
+                                   s_last_ltebler, sizeof s_last_ltebler);
+            signal_value_keep_last(s_nrvendor, sizeof s_nrvendor,
+                                   s_last_nrvendor, sizeof s_last_nrvendor);
+            if (!strcmp(s_nrports, "-"))
+                snprintf(s_nrports, sizeof s_nrports, "等待RRC CSI-RS");
+            if (!strcmp(s_nrservssb, "-"))
+                snprintf(s_nrservssb, sizeof s_nrservssb, "等待ML1");
+            if (!strcmp(s_nrbeam, "-"))
+                snprintf(s_nrbeam, sizeof s_nrbeam, "等待RRC配置");
+            if (!strcmp(s_nrbler, "-"))
+                snprintf(s_nrbler, sizeof s_nrbler, "等待PDSCH");
+            if (!strcmp(s_ltebler, "-"))
+                snprintf(s_ltebler, sizeof s_ltebler, "等待PDSCH");
+            if (!strcmp(s_nrmcs, "-"))
+                snprintf(s_nrmcs, sizeof s_nrmcs, "等待PDSCH");
+            if (!strcmp(s_nrmod, "-"))
+                snprintf(s_nrmod, sizeof s_nrmod, "等待PDSCH");
+            if (!strcmp(s_nrmimo, "-"))
+                snprintf(s_nrmimo, sizeof s_nrmimo, "等待PDSCH");
+            if (!strcmp(s_nrlayers, "-"))
+                snprintf(s_nrlayers, sizeof s_nrlayers, "等待PDSCH");
+            if (!signal_value_present(sig.nr_dl_grants))
+                snprintf(s_nrdlgrant, sizeof s_nrdlgrant, "等待PDSCH");
+            if (!signal_value_present(sig.nr_dl_rb))
+                snprintf(s_nrdlrb, sizeof s_nrdlrb, "等待PDSCH");
+            if (!signal_value_present(sig.nr_ul_grants))
+                snprintf(s_nrulgrant, sizeof s_nrulgrant, "等待UL调度");
+            if (!signal_value_present(sig.nr_ul_rb))
+                snprintf(s_nrulrb, sizeof s_nrulrb, "等待UL调度");
+            if (!strcmp(s_nrpusch, "-"))
+                snprintf(s_nrpusch, sizeof s_nrpusch, "等待UL功控");
+            if (!strcmp(s_nrpucch, "-"))
+                snprintf(s_nrpucch, sizeof s_nrpucch, "等待UL功控");
+            if (!strcmp(s_ltemcs, "-"))
+                snprintf(s_ltemcs, sizeof s_ltemcs, "等待PDSCH");
+            if (!strcmp(s_ltemod, "-"))
+                snprintf(s_ltemod, sizeof s_ltemod, "等待PDSCH");
+            if (!signal_value_present(sig.lte_grants))
+                snprintf(s_ltegrant, sizeof s_ltegrant, "等待PDSCH");
+            if (!signal_value_present(sig.lte_rb))
+                snprintf(s_lterb, sizeof s_lterb, "等待PDSCH");
+            if (!strcmp(s_ltepusch, "-"))
+                snprintf(s_ltepusch, sizeof s_ltepusch, "等待PUSCH");
+            if (!strcmp(s_ltepucch, "-"))
+                snprintf(s_ltepucch, sizeof s_ltepucch, "等待PUCCH");
+            if (signal_value_present(sig.ta)) {
+                char *endp = NULL;
+                long ta_val = strtol(sig.ta, &endp, 10);
+                if (endp && endp != sig.ta && ta_val >= 0 && ta_val <= 65535) {
+                    snprintf(s_ta, sizeof s_ta, "%ld", ta_val);
+                    fmt_ta_distance(s_tadist, sizeof s_tadist, (int)ta_val,
+                                    ta_unit_m_for_signal(&d, &sig, (int)ta_val));
+                } else {
+                    snprintf(s_ta, sizeof s_ta, "%.15s", sig.ta);
+                    snprintf(s_tadist, sizeof s_tadist, "-");
+                }
+            }
+        }
+        signal_ui_compact(c_lte_rrc, sizeof c_lte_rrc, sig.lte_rrc);
+        signal_ui_compact(c_lte_nas, sizeof c_lte_nas, sig.lte_nas);
+        signal_ui_compact(c_nr_rrc, sizeof c_nr_rrc, sig.nr_rrc);
+        signal_ui_compact(c_nr_nas, sizeof c_nr_nas, sig.nr_nas);
+        signal_ui_compact(c_lteta, sizeof c_lteta, s_lteta);
+        signal_ui_compact(c_nrta, sizeof c_nrta, s_nrta);
+        signal_ui_compact(c_nrports, sizeof c_nrports, s_nrports);
+        signal_ui_compact(c_nrbeam, sizeof c_nrbeam, s_nrbeam);
+        signal_ui_compact(c_nrservssb, sizeof c_nrservssb, s_nrservssb);
+        signal_bler_compact(c_nrbler, sizeof c_nrbler, s_nrbler);
+        signal_bler_compact(c_ltebler, sizeof c_ltebler, s_ltebler);
+        signal_ui_compact(c_nrmcs, sizeof c_nrmcs, s_nrmcs);
+        signal_ui_compact(c_nrmod, sizeof c_nrmod, s_nrmod);
+        signal_ui_compact(c_nrmimo, sizeof c_nrmimo, s_nrmimo);
+        signal_ui_compact(c_nrlayers, sizeof c_nrlayers, s_nrlayers);
+        signal_ui_compact(c_nrdlgrant, sizeof c_nrdlgrant, s_nrdlgrant);
+        signal_ui_compact(c_nrdlrb, sizeof c_nrdlrb, s_nrdlrb);
+        signal_ui_compact(c_nrulgrant, sizeof c_nrulgrant, s_nrulgrant);
+        signal_ui_compact(c_nrulrb, sizeof c_nrulrb, s_nrulrb);
+        signal_ui_compact(c_nrpusch, sizeof c_nrpusch, s_nrpusch);
+        signal_ui_compact(c_nrpucch, sizeof c_nrpucch, s_nrpucch);
+        signal_ui_compact(c_ltemcs, sizeof c_ltemcs, s_ltemcs);
+        signal_ui_compact(c_ltemod, sizeof c_ltemod, s_ltemod);
+        signal_ui_compact(c_ltegrant, sizeof c_ltegrant, s_ltegrant);
+        signal_ui_compact(c_lterb, sizeof c_lterb, s_lterb);
+        signal_ui_compact(c_ltepusch, sizeof c_ltepusch, s_ltepusch);
+        signal_ui_compact(c_ltepucch, sizeof c_ltepucch, s_ltepucch);
+        html_esc(e_lte_rrc, sizeof e_lte_rrc, c_lte_rrc);
+        html_esc(e_lte_nas, sizeof e_lte_nas, c_lte_nas);
+        html_esc(e_nr_rrc, sizeof e_nr_rrc, c_nr_rrc);
+        html_esc(e_nr_nas, sizeof e_nr_nas, c_nr_nas);
+        html_esc(e_lteta, sizeof e_lteta, c_lteta);
+        html_esc(e_nrta, sizeof e_nrta, c_nrta);
+        html_esc(e_nrports, sizeof e_nrports, c_nrports);
+        html_esc(e_nrbeam, sizeof e_nrbeam, c_nrbeam);
+        html_esc(e_nrservssb, sizeof e_nrservssb, c_nrservssb);
+        html_esc(e_nrbler, sizeof e_nrbler, c_nrbler);
+        html_esc(e_ltebler, sizeof e_ltebler, c_ltebler);
+        html_esc(e_nrmcs, sizeof e_nrmcs, c_nrmcs);
+        html_esc(e_nrmod, sizeof e_nrmod, c_nrmod);
+        html_esc(e_nrmimo, sizeof e_nrmimo, c_nrmimo);
+        html_esc(e_nrlayers, sizeof e_nrlayers, c_nrlayers);
+        html_esc(e_nrdlgrant, sizeof e_nrdlgrant, c_nrdlgrant);
+        html_esc(e_nrdlrb, sizeof e_nrdlrb, c_nrdlrb);
+        html_esc(e_nrulgrant, sizeof e_nrulgrant, c_nrulgrant);
+        html_esc(e_nrulrb, sizeof e_nrulrb, c_nrulrb);
+        html_esc(e_nrpusch, sizeof e_nrpusch, c_nrpusch);
+        html_esc(e_nrpucch, sizeof e_nrpucch, c_nrpucch);
+        html_esc(e_ltemcs, sizeof e_ltemcs, c_ltemcs);
+        html_esc(e_ltemod, sizeof e_ltemod, c_ltemod);
+        html_esc(e_ltegrant, sizeof e_ltegrant, c_ltegrant);
+        html_esc(e_lterb, sizeof e_lterb, c_lterb);
+        html_esc(e_ltepusch, sizeof e_ltepusch, c_ltepusch);
+        html_esc(e_ltepucch, sizeof e_ltepucch, c_ltepucch);
+        html_esc(e_nrvendor, sizeof e_nrvendor, s_nrvendor);
+        s_signalcards[0] = 0;
+        so += snprintf(s_signalcards + so, sizeof s_signalcards - so,
+                       "<div class='card'><div class='title'>基站品牌识别</div><table class='sigtab'>"
+                       "<tr><td class='kv-l'>识别结果</td><td class='val sm'>%s</td></tr>"
+                       "<tr><td class='kv-l'>TA</td><td class='val'>%s</td></tr>"
+                       "<tr><td class='kv-l'>估算距离</td><td class='val'>%s</td></tr>"
+                       "</table></div>",
+                       e_nrvendor, s_ta, s_tadist);
+        if (show_nr) {
+            if (show_nr_nas) {
+                so += snprintf(s_signalcards + so, sizeof s_signalcards - so,
+                               "<div class='card'><div class='title'>NR 信令 <span class='r muted'>5G</span></div><table class='sigtab'>"
+                               "<tr><td class='kv-l'>最近 RRC</td><td class='val sm'>%s</td></tr>"
+                               "<tr><td class='kv-l'>最近 NAS</td><td class='val sm'>%s</td></tr>"
+                               "<tr><td class='kv-l'>TA</td><td class='val sm'>%s</td></tr>"
+                               "<tr><td class='kv-l'>MCS</td><td class='val sm'>%s</td></tr>"
+                               "<tr><td class='kv-l'>调制</td><td class='val sm'>%s</td></tr>"
+                               "<tr><td class='kv-l'>MIMO</td><td class='val sm'>%s</td></tr>"
+                               "<tr><td class='kv-l'>layers</td><td class='val sm'>%s</td></tr>"
+                               "<tr><td class='kv-l'>DL/UL Grant</td><td class='val sm'>%s/%s</td></tr>"
+                               "<tr><td class='kv-l'>DL/UL RB</td><td class='val sm'>%s/%s</td></tr>"
+                               "<tr><td class='kv-l'>BLER</td><td class='val sm'>%s</td></tr>"
+                               "<tr><td class='kv-l'>PUSCH</td><td class='val sm'>%s</td></tr>"
+                               "<tr><td class='kv-l'>PUCCH</td><td class='val sm'>%s</td></tr>"
+                               "<tr><td class='kv-l'>Ports</td><td class='val sm'>%s</td></tr>"
+                               "<tr><td class='kv-l'>SSB Index</td><td class='val sm'>%s</td></tr>"
+                               "</table></div>",
+                               e_nr_rrc, e_nr_nas, e_nrta, e_nrmcs, e_nrmod, e_nrmimo, e_nrlayers,
+                               e_nrdlgrant, e_nrulgrant, e_nrdlrb, e_nrulrb, e_nrbler,
+                               e_nrpusch, e_nrpucch, e_nrports, e_nrservssb);
+            } else {
+                so += snprintf(s_signalcards + so, sizeof s_signalcards - so,
+                               "<div class='card'><div class='title'>NR 信令 <span class='r muted'>5G</span></div><table class='sigtab'>"
+                               "<tr><td class='kv-l'>最近 RRC</td><td class='val sm'>%s</td></tr>"
+                               "<tr><td class='kv-l'>TA</td><td class='val sm'>%s</td></tr>"
+                               "<tr><td class='kv-l'>MCS</td><td class='val sm'>%s</td></tr>"
+                               "<tr><td class='kv-l'>调制</td><td class='val sm'>%s</td></tr>"
+                               "<tr><td class='kv-l'>MIMO</td><td class='val sm'>%s</td></tr>"
+                               "<tr><td class='kv-l'>layers</td><td class='val sm'>%s</td></tr>"
+                               "<tr><td class='kv-l'>DL/UL Grant</td><td class='val sm'>%s/%s</td></tr>"
+                               "<tr><td class='kv-l'>DL/UL RB</td><td class='val sm'>%s/%s</td></tr>"
+                               "<tr><td class='kv-l'>BLER</td><td class='val sm'>%s</td></tr>"
+                               "<tr><td class='kv-l'>PUSCH</td><td class='val sm'>%s</td></tr>"
+                               "<tr><td class='kv-l'>PUCCH</td><td class='val sm'>%s</td></tr>"
+                               "<tr><td class='kv-l'>Ports</td><td class='val sm'>%s</td></tr>"
+                               "<tr><td class='kv-l'>SSB Index</td><td class='val sm'>%s</td></tr>"
+                               "</table></div>",
+                               e_nr_rrc, e_nrta, e_nrmcs, e_nrmod, e_nrmimo, e_nrlayers,
+                               e_nrdlgrant, e_nrulgrant, e_nrdlrb, e_nrulrb, e_nrbler, e_nrpusch,
+                               e_nrpucch, e_nrports, e_nrservssb);
+            }
+        }
+        if (show_lte) {
+            so += snprintf(s_signalcards + so, sizeof s_signalcards - so,
+                           "<div class='card'><div class='title'>LTE 信令 <span class='r muted'>4G</span></div><table class='sigtab'>"
+                           "<tr><td class='kv-l'>最近 RRC</td><td class='val sm'>%s</td></tr>"
+                           "<tr><td class='kv-l'>最近 NAS</td><td class='val sm'>%s</td></tr>"
+                           "<tr><td class='kv-l'>TA</td><td class='val sm'>%s</td></tr>"
+                           "<tr><td class='kv-l'>MCS</td><td class='val sm'>%s</td></tr>"
+                           "<tr><td class='kv-l'>调制</td><td class='val sm'>%s</td></tr>"
+                           "<tr><td class='kv-l'>Grant</td><td class='val sm'>%s</td></tr>"
+                           "<tr><td class='kv-l'>RB</td><td class='val sm'>%s</td></tr>"
+                           "<tr><td class='kv-l'>BLER</td><td class='val sm'>%s</td></tr>"
+                           "<tr><td class='kv-l'>PUSCH</td><td class='val sm'>%s</td></tr>"
+                           "<tr><td class='kv-l'>PUCCH</td><td class='val sm'>%s</td></tr>"
+                           "</table></div>",
+                           e_lte_rrc, e_lte_nas, e_lteta, e_ltemcs, e_ltemod,
+                           e_ltegrant, e_lterb, e_ltebler, e_ltepusch, e_ltepucch);
+        }
+        if (so == 0) {
+            snprintf(s_signalcards, sizeof s_signalcards,
+                     "<div class='card'><div class='title'>信令信息</div><div class='sec'>当前网络没有可展示的 LTE / NR 信令卡片。</div></div>");
+            so = (int)strlen(s_signalcards);
+        }
+        so += snprintf(s_signalcards + so, sizeof s_signalcards - so,
+                       "<a href='act:sigrescan' class='card resetbtn2'>重新搜网</a>");
+    } else {
+        snprintf(s_nrports, sizeof s_nrports, "-");
+        snprintf(s_nrbeam, sizeof s_nrbeam, "-");
+        snprintf(s_nrvendor, sizeof s_nrvendor, "-");
+        s_signalcards[0] = 0;
+    }
 
     /* NR carriers: PCell from main fields + nrca SCells */
     s_nrrows[0] = 0;
     if (show_nr && nr_band[0] && d.nr_bw[0]) {
         snprintf(rp, sizeof rp, "%d", d.nr_rsrp); snprintf(pc, sizeof pc, "%d", d.nr_pci);
         snprintf(ac, sizeof ac, "%ld", d.nr_channel);
-        no = car_row(s_nrrows, no, sizeof s_nrrows, nr_band, d.nr_bw, ac, pc, rp, d.nr_snr);
+        no = car_row(s_nrrows, no, sizeof s_nrrows, nr_band, d.nr_bw, ac, pc, rp, d.nr_snr,
+                     nr_hsr_freq_hint(d.mcc, ac));
         nr_show_cc = 1; nr_show_bw = atoi(d.nr_bw);
         if (!carrier_is_inactive(rp)) { nr_cc = 1; nr_bw = atoi(d.nr_bw); }
     }
@@ -1357,8 +2686,10 @@ static int build_kv(struct kv *t, const char *path)
             if (nf > 5 && atoi(f[5]) > 0) {
                 double rpv = (nf > 7 && f[7] && f[7][0]) ? atof(f[7]) : 0.0;
                 char bn[12]; snprintf(bn, sizeof bn, "n%s", f[3]);
-                no = car_row(s_nrrows, no, sizeof s_nrrows, bn, f[5], nf > 4 ? f[4] : "-",
-                             nf > 1 ? f[1] : "-", nf > 7 ? f[7] : "-", nf > 9 ? f[9] : "-");
+                const char *nr_ac = nf > 4 ? f[4] : "-";
+                no = car_row(s_nrrows, no, sizeof s_nrrows, bn, f[5], nr_ac,
+                             nf > 1 ? f[1] : "-", nf > 7 ? f[7] : "-", nf > 9 ? f[9] : "-",
+                             nr_hsr_freq_hint(d.mcc, nr_ac));
                 nr_show_cc++;
                 nr_show_bw += atoi(f[5]);
                 if (rpv > -140.0) { nr_cc++; nr_bw += atoi(f[5]); }
@@ -1412,7 +2743,7 @@ static int build_kv(struct kv *t, const char *path)
                     if (d.lte_snr[0]) snprintf(ls, sizeof ls, "%s", d.lte_snr);
                 }
                 lo = car_row(s_lterows, lo, sizeof s_lterows, bn, f_bw, f_arfcn ? f_arfcn : "-",
-                             f_pci ? f_pci : "-", lr, ls);
+                             f_pci ? f_pci : "-", lr, ls, 0);
                 lte_show_cc++;
                 lte_show_bw += atoi(f_bw);
                 if (!carrier_is_inactive(lr)) { lte_cc++; lte_bw += atoi(f_bw); }
@@ -1436,15 +2767,19 @@ static int build_kv(struct kv *t, const char *path)
       else                 snprintf(cnt, sizeof cnt, "无载波");
       snprintf(s_carriers, sizeof s_carriers, "<div class='sec'>%s · %s · %d MHz</div>%s%s",
                cmode, cnt, total_show_bw, s_nrrows, s_lterows); }
+    const char *hsr_card_cls = d.hsr ? " hsrmode" : "";
+    const char *hsr_mode_note = d.hsr ? "<div class='hsrmode-note'>高铁模式</div>" : "";
     if ((is_endc || is_nsa) && s_nrrows[0] && s_lterows[0]) {
         snprintf(s_nr_block, sizeof s_nr_block,
-                 "<div class='card'>"
+                 "<div class='card%s'>"
                  "<div class='title'>%s <span class='sub'>%s</span>"
                  "<span class='qa'><b>QCI %s</b><br>AMBR %s</span></div>"
+                 "%s"
                  "<div class='sec'>%s · %d LTE + %d NR 载波 · %d MHz</div>"
                  "<div class='ctitle'>NR</div>%s"
                  "</div>",
-                 s_oper, d.net_type, s_qci, s_ambr, cmode, lte_show_cc, nr_show_cc, total_show_bw, s_nrrows);
+                 hsr_card_cls, s_oper, d.net_type, s_qci, s_ambr, hsr_mode_note,
+                 cmode, lte_show_cc, nr_show_cc, total_show_bw, s_nrrows);
         snprintf(s_lte_block, sizeof s_lte_block,
                  "<div class='card'><div class='ctitle'>LTE</div>"
                  "<div class='sec'>%d LTE 载波 · %d MHz</div>%s</div>",
@@ -1452,12 +2787,13 @@ static int build_kv(struct kv *t, const char *path)
         snprintf(s_sigcards, sizeof s_sigcards, "%s%s", s_nr_block, s_lte_block);
     } else {
         snprintf(s_sigcards, sizeof s_sigcards,
-                 "<div class='card'>"
+                 "<div class='card%s'>"
                  "<div class='title'>%s <span class='sub'>%s</span>"
                  "<span class='qa'><b>QCI %s</b><br>AMBR %s</span></div>"
                  "%s"
+                 "%s"
                  "</div>",
-                 s_oper, d.net_type, s_qci, s_ambr, s_carriers);
+                 hsr_card_cls, s_oper, d.net_type, s_qci, s_ambr, hsr_mode_note, s_carriers);
     }
 
     /* generation badge: 5GA / 5G+ / 5G / 4G / LTE / 3G */
@@ -1549,7 +2885,7 @@ static int build_kv(struct kv *t, const char *path)
 
     /* ---- system extras: usage, temps, version, imei, brightness, auto-off ---- */
     static char s_cusage[8], s_ctemp[8], s_btemp[8], s_swver[80], s_imei[24], s_spu[8], s_bright[8];
-    static char s_memdet[24], s_upshort[16], s_autooff[420], s_refreshseg[360];
+    static char s_memdet[24], s_upshort[16], s_autooff[420], s_refreshseg[480];
     { int bmax = backlight_max(); if (bmax <= 0) bmax = 255;
       snprintf(s_bright, sizeof s_bright, "%d", clampi(backlight_get() * 100 / bmax, 0, 100)); }
     { long mt = d.mem_total, ma = d.mem_avail;
@@ -1582,10 +2918,10 @@ static int build_kv(struct kv *t, const char *path)
     }
     {   /* refresh segmented control (#refreshseg), same UI as auto-off */
         int active = 0;
-        for (int k = 0; k < 4; k++) if (g_refresh_rates[k].ms == g_refresh_ms) active = k;
+        for (int k = 0; k < 5; k++) if (g_refresh_rates[k].ms == g_refresh_ms) active = k;
         int hl = g_segdrag == 3 ? -1 : active;
-        int o = snprintf(s_refreshseg, sizeof s_refreshseg, "<div id='refreshseg' class='seg seg4'>");
-        for (int k = 0; k < 4; k++)
+        int o = snprintf(s_refreshseg, sizeof s_refreshseg, "<div id='refreshseg' class='seg seg5'>");
+        for (int k = 0; k < 5; k++)
             o += snprintf(s_refreshseg + o, sizeof s_refreshseg - o,
                 "<a href='act:refreshms:%d' class='segc%s'>%s</a>",
                 g_refresh_rates[k].ms, k == hl ? " seg-on" : "", g_refresh_rates[k].lab);
@@ -1689,6 +3025,8 @@ static int build_kv(struct kv *t, const char *path)
     t[i++] = (struct kv){ "SINR", s_sinr };        t[i++] = (struct kv){ "SINR_W", w_sinr };
     t[i++] = (struct kv){ "BW", s_bw };            t[i++] = (struct kv){ "BW_W", w_bw };
     t[i++] = (struct kv){ "CELLID", s_cellid };    t[i++] = (struct kv){ "PCI", s_pci };
+    t[i++] = (struct kv){ "TA", s_ta };            t[i++] = (struct kv){ "TADIST", s_tadist };
+    t[i++] = (struct kv){ "SIGDETAILCARDS", s_signalcards };
     t[i++] = (struct kv){ "CELLBTN", g_show_cellid ? "隐藏" : "显示" };
     t[i++] = (struct kv){ "CLIENTS", s_clients };  t[i++] = (struct kv){ "UPTIME", s_up };
     t[i++] = (struct kv){ "RXSPEED", s_rxs };      t[i++] = (struct kv){ "TXSPEED", s_txs };
@@ -1724,6 +3062,7 @@ static int build_kv(struct kv *t, const char *path)
     t[i++] = (struct kv){ "IMEIBTN", g_show_imei ? "隐藏" : "显示" };
     t[i++] = (struct kv){ "BRIGHT", s_bright };   t[i++] = (struct kv){ "AUTOOFF", s_autooff };
     t[i++] = (struct kv){ "REFRESHSEG", s_refreshseg };
+    t[i++] = (struct kv){ "SIGADVSTATE", s_sigadvstate };
     t[i++] = (struct kv){ "MEMDETAIL", s_memdet }; t[i++] = (struct kv){ "UPSHORT", s_upshort };
     t[i++] = (struct kv){ "CHGV", s_chgv };       t[i++] = (struct kv){ "CHGI", s_chgi };
     t[i++] = (struct kv){ "BATV", s_batv };       t[i++] = (struct kv){ "BATI", s_bati };
@@ -2192,6 +3531,10 @@ int main(void)
     #define CUR_PATH (g_lock_state == 1 ? g_pages[0] : g_lock_state ? lock_path : menu ? menu_path : g_pages[g_cur])
 
     load_conf();                          /* restore persisted UI settings */
+    if (!g_charge_boot) rescan_pages_keep_current();
+    (void)datad_set_refresh_ms(g_refresh_ms);
+    (void)datad_set_signal_read(g_sig_read);
+    (void)datad_set_signal_parse(g_sig_parse);
     if (g_saved_bright >= 0) backlight_set(g_saved_bright);   /* restore brightness */
     if (!g_charge_boot) {
         load_pin();
@@ -2377,6 +3720,38 @@ int main(void)
             /* second-level band-lock dialog: tap only (level-1 is disabled) */
             if (!pressed && prev_press) {
                 const char *act = html_view_click((float)x, (float)y);
+                if (g_modal == 4) {
+                    if (!strncmp(act, "act:", 4)) {
+                        const char *a = act + 4;
+                        if (!strcmp(a, "sigread")) {
+                            g_sig_read = !g_sig_read;
+                            (void)datad_set_signal_read(g_sig_read);
+                            save_conf();
+                            snprintf(g_toast, sizeof g_toast, "信令读取已%s", g_sig_read ? "开启" : "关闭");
+                            g_toast_until = now + 1600;
+                            invalidate_render_html_cache();
+                            need_render = 1;
+                        } else if (!strcmp(a, "sigparse")) {
+                            g_sig_parse = !g_sig_parse;
+                            (void)datad_set_signal_parse(g_sig_parse);
+                            save_conf();
+                            rescan_pages_keep_current();
+                            invalidate_render_html_cache();
+                            snprintf(g_toast, sizeof g_toast, "信令解析已%s", g_sig_parse ? "开启" : "关闭");
+                            g_toast_until = now + 1600;
+                            need_render = 1;
+                        } else if (!strcmp(a, "sigrescan")) {
+                            (void)modem_request_network_rescan();
+                            snprintf(g_toast, sizeof g_toast, "已请求信令/邻区刷新，不会断网");
+                            g_toast_until = now + 2200;
+                            invalidate_render_html_cache();
+                            need_render = 1;
+                        } else if (!strcmp(a, "closemodal")) {
+                            g_modal = 0;
+                            need_render = 1;
+                        }
+                    }
+                } else {
                 char *sel = g_modal == 1 ? g_sel_sa : g_modal == 2 ? g_sel_nsa : g_sel_lte;
                 const char *uni = g_modal == 1 ? g_uni_sa : g_modal == 2 ? g_uni_nsa : g_uni_lte;
                 if (!strncmp(act, "act:", 4)) {
@@ -2403,6 +3778,7 @@ int main(void)
                         g_modal = 0; need_render = 1;
                     }
                 } else { g_modal = 0; need_render = 1; }   /* tap outside closes */
+                }
             }
         } else {
             int maxs = g_page_h > H ? g_page_h - H : 0;
@@ -2449,7 +3825,7 @@ int main(void)
                     else if (html_view_rect("#autoseg", &bx, &by, &bw, &bh) &&
                              x >= bx && x < bx + bw && y >= by - 4 && y < by + bh + 4) { which = 2; n = 6; }
                     else if (html_view_rect("#refreshseg", &bx, &by, &bw, &bh) &&
-                             x >= bx && x < bx + bw && y >= by - 4 && y < by + bh + 4) { which = 3; n = 4; }
+                             x >= bx && x < bx + bw && y >= by - 4 && y < by + bh + 4) { which = 3; n = 5; }
                     if (which) {
                         segging = 1; seg_which = which; seg_n = n;
                         seg_x = bx; seg_y = by; seg_w = bw; seg_h = bh;
@@ -2523,6 +3899,7 @@ int main(void)
                         g_autooff_ms = g_autooffs[c].ms; last_act = now; save_conf();
                     } else {
                         g_refresh_ms = normalize_refresh_ms(g_refresh_rates[c].ms);
+                        (void)datad_set_refresh_ms(g_refresh_ms);
                         if (g_refresh_ms > 0) {
                             if (data_backend_commit_latest()) need_render = 1;
                             state_pending = 0;
@@ -2584,6 +3961,13 @@ int main(void)
                             system("(kill -USR1 $(pidof zwrt-datad 2>/dev/null) >/dev/null 2>&1) || true");
                             snprintf(g_toast, sizeof g_toast, "已请求刷新 AMBR");
                             g_toast_until = now + 1600;
+                            need_render = 1;
+                        }
+                        else if (!strcmp(a, "sigrescan")) {
+                            (void)modem_request_network_rescan();
+                            snprintf(g_toast, sizeof g_toast, "已请求信令/邻区刷新，不会断网");
+                            g_toast_until = now + 2200;
+                            invalidate_render_html_cache();
                             need_render = 1;
                         }
                         else if (!strcmp(a, "spunit"))    { g_speed_bits = !g_speed_bits; save_conf(); need_render = 1; }
@@ -2743,6 +4127,7 @@ int main(void)
                         }
                         else if (!strncmp(a, "refreshms:", 10)) {   /* preset select */
                             g_refresh_ms = normalize_refresh_ms(atoi(a + 10));
+                            (void)datad_set_refresh_ms(g_refresh_ms);
                             if (g_refresh_ms > 0) {
                                 if (data_backend_commit_latest()) need_render = 1;
                                 state_pending = 0;
@@ -2766,7 +4151,8 @@ int main(void)
                         }
                         else if (!strncmp(a, "openmodal:", 10)) {   /* open band-lock dialog */
                             const char *r = a + 10;
-                            g_modal = !strcmp(r, "sa") ? 1 : !strcmp(r, "nsa") ? 2 : 3;
+                            if (!strcmp(r, "sig")) g_modal = 4;
+                            else g_modal = !strcmp(r, "sa") ? 1 : !strcmp(r, "nsa") ? 2 : 3;
                             need_render = 1;
                         }
                         else if (!strncmp(a, "sms:", 4)) {   /* open SMS detail + mark read */

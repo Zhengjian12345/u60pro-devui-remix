@@ -23,7 +23,7 @@
 #endif
 
 #ifndef DEVUI_BACKEND_PORT
-#define DEVUI_BACKEND_PORT 9460
+#define DEVUI_BACKEND_PORT 19460
 #endif
 
 #ifndef DEVUI_BACKEND_STATE_PATH
@@ -118,6 +118,20 @@ static const char *mainland_operator_cn(int mcc, int mnc, const char *raw)
     return NULL;
 }
 
+static int truthy_value(const char *v)
+{
+    return v && (!strcmp(v, "1") ||
+                 !strcmp(v, "true") || !strcmp(v, "True") || !strcmp(v, "TRUE") ||
+                 !strcmp(v, "yes") || !strcmp(v, "YES") ||
+                 !strcmp(v, "on") || !strcmp(v, "ON"));
+}
+
+static int force_hsr_enabled(void)
+{
+    if (truthy_value(getenv("DEVUI_FORCE_HSR"))) return 1;
+    return access("/tmp/u60-force-hsr", F_OK) == 0;
+}
+
 /* p points at '{' — return the matching '}', skipping braces inside strings. */
 static char *obj_end(char *p)
 {
@@ -179,6 +193,10 @@ static int parse_snapshot(devui_data_t *d, const char *buf)
         getstr(sec, "sa_bands", d->sa_bands, sizeof d->sa_bands);
         getstr(sec, "nsa_bands", d->nsa_bands, sizeof d->nsa_bands);
         getstr(sec, "lte_bands", d->lte_bands, sizeof d->lte_bands);
+        {
+            char hsr[16];
+            d->hsr = json_get(sec, "HSR", hsr, sizeof hsr) ? truthy_value(hsr) : 0;
+        }
         d->bars     = (int)json_get_int(sec, "bars", 0);
         d->nr_rsrp  = (int)json_get_int(sec, "nr_rsrp", 0);
         d->nr_rsrq  = (int)json_get_int(sec, "nr_rsrq", 0);
@@ -323,6 +341,8 @@ static int parse_snapshot(devui_data_t *d, const char *buf)
         getstr(sec, "sw_version", d->sw_version, sizeof d->sw_version);
         getstr(sec, "imei", d->imei, sizeof d->imei);
     }
+
+    if (force_hsr_enabled()) d->hsr = 1;
 
     d->valid = 1;
     return 1;
@@ -746,6 +766,7 @@ int data_refresh(devui_data_t *d)
         return 0;
     }
     *d = g_backend.current_data;
+    if (force_hsr_enabled()) d->hsr = 1;
     return 1;
 }
 
@@ -760,5 +781,6 @@ int data_refresh_live(devui_data_t *d)
         return 0;
     }
     *d = g_backend.live_data;
+    if (force_hsr_enabled()) d->hsr = 1;
     return 1;
 }

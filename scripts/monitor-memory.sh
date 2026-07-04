@@ -41,7 +41,15 @@ read_state_meta() {
     fi
     ts=$(printf '%s' "$body" | sed -n 's/.*"ts"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' | head -n 1)
     size=$(printf '%s' "$body" | wc -c | awk '{print $1}')
-    sum=$(printf '%s' "$body" | cksum | awk '{print $1}')
+    if command -v cksum >/dev/null 2>&1; then
+        sum=$(printf '%s' "$body" | cksum | awk '{print $1}')
+    elif command -v md5sum >/dev/null 2>&1; then
+        sum=$(printf '%s' "$body" | md5sum | awk '{print $1}')
+    elif command -v md5 >/dev/null 2>&1; then
+        sum=$(printf '%s' "$body" | md5 | awk '{print $1}')
+    else
+        sum=0
+    fi
     echo "${ts:-0} ${size:-0} ${sum:-0}"
 }
 

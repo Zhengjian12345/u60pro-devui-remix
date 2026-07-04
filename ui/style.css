@@ -47,6 +47,28 @@ body.light .batt { background: #1b1d22; color: #ffffff; }
 .card { margin: 6px 8px 0; border-radius: 8px; padding: 7px 10px; }
 body.dark  .card { background: #23262c; border: 1px solid #323843; }
 body.light .card { background: #ffffff; border: 1px solid #dde1e8; }
+.card.hsrmode { border-color: rgba(167,139,250,.48); }
+body.dark .card.hsrmode {
+  background: linear-gradient(145deg, #221634, #31204d 58%, #21172f);
+  border-color: rgba(167,139,250,.48);
+  box-shadow: inset 3px 0 0 #a78bfa;
+}
+body.light .card.hsrmode {
+  background: linear-gradient(145deg, #faf5ff, #eee2ff 62%, #ffffff);
+  border-color: rgba(124,58,237,.30);
+  box-shadow: inset 3px 0 0 #8b5cf6;
+}
+.card.hsrmode .title { color: #f5f3ff; }
+body.light .card.hsrmode .title { color: #3b0764; }
+.hsrmode-note {
+  margin-top: 2px;
+  margin-bottom: 4px;
+  font-size: 11px;
+  line-height: 14px;
+  letter-spacing: 1px;
+  color: #c4b5fd;
+}
+body.light .hsrmode-note { color: #6d28d9; }
 .title { font-size: 15px; font-weight: 700; overflow: hidden; }
 .title .sub { font-size: 12px; font-weight: 400; color: #6f7681; margin-left: 6px; }
 .ok { color: #5ec85e; }
@@ -57,6 +79,11 @@ table { width: 100%; border-collapse: collapse; }
 td { padding: 2px 0; vertical-align: middle; font-size: 13px; }
 td.kv-l { width: 96px; color: #8a929d; white-space: nowrap; }
 .val { text-align: right; }
+.sigtab { table-layout: fixed; }
+.sigtab td.kv-l { width: 88px; }
+.sigtab .val { width: 178px; white-space: normal; overflow: hidden;
+               word-wrap: break-word; overflow-wrap: break-word; word-break: break-all; }
+.sigtab .val.sm { font-size: 12px; line-height: 1.25; }
 a.rev { text-decoration: none; font-size: 12px; padding: 1px 8px; border-radius: 4px; }
 body.dark  a.rev { background: #2c2f37; color: #cfd4dc; }
 body.light a.rev { background: #d3d9e2; color: #2a2f38; }
@@ -80,6 +107,20 @@ body.light .qa b { color: #2a2f38; }
 .ccd { padding: 7px 2px 6px; overflow: hidden; }
 body.dark  .ccd { border-top: 1px solid #2d323b; }
 body.light .ccd { border-top: 1px solid #e6e9ef; }
+.ccd.hsrhint {
+  margin: 6px -5px 3px;
+  padding: 8px 7px 7px;
+  border-radius: 9px;
+  box-shadow: inset 3px 0 0 #8b5cf6;
+}
+body.dark .ccd.hsrhint {
+  background: linear-gradient(135deg, rgba(139,92,246,.22), rgba(74,35,112,.12));
+  border-top-color: rgba(167,139,250,.36);
+}
+body.light .ccd.hsrhint {
+  background: linear-gradient(135deg, rgba(139,92,246,.16), rgba(236,223,255,.72));
+  border-top-color: rgba(124,58,237,.24);
+}
 .cb { font-size: 16px; font-weight: 700; }
 .cbw { font-size: 12px; color: #8a929d; }
 .cinfo { float: right; text-align: right; }
@@ -95,6 +136,9 @@ body.light .ccd { border-top: 1px solid #e6e9ef; }
 .coff { display: inline-block; font-size: 10px; line-height: 15px; color: #6b7280;
         margin-left: 12px; padding: 0 6px; border: 1px solid #4a515c; border-radius: 4px;
         vertical-align: middle; }
+.chsr { display: inline-block; font-size: 10px; line-height: 15px; color: #f2e8ff;
+        margin-left: 8px; padding: 0 6px; border: 1px solid rgba(196,181,253,.7);
+        border-radius: 999px; background: rgba(124,58,237,.76); vertical-align: middle; }
 
 .big { font-size: 26px; font-weight: 700; }
 .muted { color: #8a929d; font-weight: 400; }
@@ -149,6 +193,7 @@ body.light .seg { background: #d3d9e2; }
 .segc { display: table-cell; text-align: center; font-size: 15px; padding: 12px 0;
         text-decoration: none; white-space: nowrap; }
 .seg4 .segc { width: 25%; }            /* explicit widths = equal cells */
+.seg5 .segc { width: 20%; font-size: 13px; padding: 11px 0; }
 .seg6 { margin-top: 5px; }
 .seg6 .segc { width: 16.66%; font-size: 13px; padding: 11px 0; }
 body.dark  .segc { color: #cfd4dc; }
@@ -228,7 +273,7 @@ body.light .sms + .sms { border-top: 1px solid #e6e9ef; }
 
 /* ---- toggle switch (settings) ---- */
 /* table row so the switch vertical-centers against the (two-line) label */
-.row { display: table; width: 100%; padding: 7px 0; }
+.row { display: table; width: 100%; padding: 7px 0; text-decoration: none; color: inherit; }
 body.dark  .row + .row { border-top: 1px solid #2d323b; }
 body.light .row + .row { border-top: 1px solid #e6e9ef; }
 .row .lab { display: table-cell; vertical-align: middle; font-size: 14px; }

@@ -99,8 +99,10 @@ cp u60pro-devui.stripped u60pro-devui-aarch64
 
 - [docs/UI-GUIDE.md](docs/UI-GUIDE.md) — **自定义界面教程**（令牌、动作、限制、示例）
 - [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) — 架构、构建、数据模型、踩坑记录
+- [docs/modem.md](docs/modem.md) — 第二页信令页 / 基站信息页的页面行为与字段口径
 - [docs/DEVUI-IPC.md](docs/DEVUI-IPC.md) — DevUI 内建外部画面接口（像素帧、图片、绘图命令、文字）
 - [docs/HARDWARE.md](docs/HARDWARE.md) — 设备硬件接口
+- [docs/REPO_BOUNDARY.md](docs/REPO_BOUNDARY.md) — 公开仓库与本地记录的边界
 - [CHANGELOG.md](CHANGELOG.md) — 更新日志
 
 ## 许可证

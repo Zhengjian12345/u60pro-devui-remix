@@ -12,6 +12,8 @@ UI_DIR=$DEVUI_DIR/ui
 LEGACY_UI_DIR=/data/ui
 DEVUI_BIN=$DEVUI_DIR/u60pro-devui
 DATAD_BIN=$DATAD_DIR/zwrt-datad
+DATAD_MODEM_REMOTE_STREAM=${DATAD_MODEM_REMOTE_STREAM:-1}
+DATAD_MODEM_REMOTE_STALE_SEC=${DATAD_MODEM_REMOTE_STALE_SEC:-6}
 MODE="${1:-legacy}"
 
 mkdir -p "$DEVUI_DIR" "$DATAD_DIR" "$UI_DIR"
@@ -86,7 +88,9 @@ start_datad_legacy() {
     [ -x "$DATAD_BIN" ] || return 0
     pidof zwrt-datad >/dev/null 2>&1 && return 0
     killall -9 u60-datad 2>/dev/null
-    nohup "$DATAD_BIN" -i 1000 >/tmp/zwrt-datad.log 2>&1 </dev/null &
+    nohup env DATAD_MODEM_REMOTE_STREAM="$DATAD_MODEM_REMOTE_STREAM" \
+        DATAD_MODEM_REMOTE_STALE_SEC="$DATAD_MODEM_REMOTE_STALE_SEC" \
+        "$DATAD_BIN" -i 1000 -p 19460 >/tmp/zwrt-datad.log 2>&1 </dev/null &
     sleep 1
 }
 

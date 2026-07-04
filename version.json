@@ -1,13 +1,13 @@
 {
   "schema": 1,
   "devui": {
-    "version": "1.2.3",
+    "version": "1.2.4",
     "asset": "u60pro-devui-aarch64",
-    "notes": "图表页功率曲线与功率卡片统一改读电池数据，发布构建说明同步收敛到当前 build.sh 产物"
+    "notes": "新增高铁模式显示、信令刷新同步与公开仓库边界整理"
   },
   "ui": {
-    "version": "0.4.4",
+    "version": "0.4.5",
     "asset": "ui.tar.gz",
-    "notes": "图表页右上角功率文案直接显示充电或放电，曲线不再依赖正负号区分"
+    "notes": "信号页支持 HSR 紫色状态与基站信息页模板"
   }
 }

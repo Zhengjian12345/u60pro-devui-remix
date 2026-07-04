@@ -4,11 +4,16 @@
 /u60pro-devui
 /u60pro-devui.stripped
 /u60pro-devui-aarch64
+/u60pro-devui.sse
 /html-poc
 /html-poc.stripped
+/html-poc.zig
+/html-poc.zig.stripped
 /drm_test
 /fbserver
 /touchsim
+/.zig-build/
+/zig-build-obj/
 
 # Release packaging
 /ui.tar.gz
@@ -19,6 +24,8 @@
 after_swipe.png
 frame_*.png
 screenshot.png
+/previews/
+/-S
 
 # Generated icon assets — the renderer does not draw images yet, so these are
 # unused. Author UI with CSS shapes / Unicode instead (see docs/UI-GUIDE.md).
@@ -40,3 +47,11 @@ drm_text
 .idea/
 *.swp
 .DS_Store
+
+# Local-only operational notes (do not publish to github)
+/.local-notes/
+/agents.md
+/docs/LOCAL-CHANGES.md
+/docs/WORKFLOW-LOCAL.md
+/docs/WORKFLOW-LOCAL-U60.md
+/docs/WORKFLOW-PRIVATE.md

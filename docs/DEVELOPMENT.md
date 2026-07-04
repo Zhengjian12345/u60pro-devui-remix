@@ -4,92 +4,11 @@
 
 > 当前正式命名与安装路径已经统一为：`zwrt-datad`、`/data/plugins/zwrt-datad/zwrt-datad`、`/data/plugins/u60pro-devui/`。下文历史章节里如果出现 `u60-datad` 或 `/data/u60pro`，表示当时版本记录，不再是当前安装规范。
 
-## 2026-06-29 现场协作记录（用于上下文接续）
-- 经过最近一轮采样（见 [`agents.md`](./agents.md)）结论：`u60pro-devui` 与 `zwrt-datad` 的 RSS 在持续采样窗口内未见显著持续上升；`ufi-tools-u60pro` 常驻内存偏高属于组件自身行为，内存问题按“样本窗口对比”继续复核。
-- 编译链路确认：`ubuntu`（`y@directhk.ericsfj.com:322`）是这条内网 Ubuntu 编译机，`server` 非编译机器且本条链路不再使用；本地代码通过 `rsync` 到 `ubuntu` 再编译、再回灌 u60。
-- 已固定 SSH 信息：`u60`、`mbb`（g5pro）共用同一把密钥，`mbb` 对应 `direct.mbb.ericsfj.com`，`u60` 与 `mbb` 的调试、同步与诊断命令优先以 `agents.md` 为准。
+## 维护范围
 
-## 2026-06-25 历史 Review 记录（修复前）
-
-这段保留的是修复前的本地 review 记录，主要作为问题来历备忘；当前状态以后面的“修复后复查补记”和实际代码为准。范围主要看：
-
-- `u60pro-devui/src/htmlmain.c`
-- `u60pro-devui/src/data.c`
-- `u60pro-devui/src/json.c`
-- `u60pro-devui/src/html_view.cpp`
-- `zwrt-datad-u60pro/src/main.c`
-
-当前已经确认的结论：
-
-- **短信“读不到”有一个很硬的根因：当前 `zwrt-datad-u60pro/src/main.c` 源码根本没有产出 `sms` 段。**
-  证据：`build_snapshot()` 里当前只拼了 `net` / `battery` / `clients` / `traffic` / `qos` / `wlan` / `nfc` / `dhcp` / `system`，[`zwrt-datad-u60pro/src/main.c:340`](/Users/y/Documents/devui-workspace/zwrt-datad-u60pro/src/main.c:340) 到 [`zwrt-datad-u60pro/src/main.c:470`](/Users/y/Documents/devui-workspace/zwrt-datad-u60pro/src/main.c:470) 之间没有任何 `zwrt_wms`、`sms`、`zte_libwms_get_sms_data` 或 `"sms":{...}` 输出逻辑。也就是说，如果设备跑的是这份源码编出来的后端，前端的短信页天然只能拿到空数据。
-
-- **前端短信消费链仍然假设后端会提供 `sms`。**
-  `data_refresh()` 会从快照里读 `sms` 并解析列表，见 [`u60pro-devui/src/data.c:118`](/Users/y/Documents/devui-workspace/u60pro-devui/src/data.c:118) 到 [`u60pro-devui/src/data.c:143`](/Users/y/Documents/devui-workspace/u60pro-devui/src/data.c:143)。这说明“短信页空白”不是前端根本没接，而是“消费端在等、生产端没产出”。
-
-- **即便后端把短信段补回，当前 `zwrt-datad` 的快照缓冲也偏小，长短信/多短信时有高概率直接截断 JSON。**
-  现在 `RAW_MAX` 只有 `8192`，见 [`zwrt-datad-u60pro/src/main.c:33`](/Users/y/Documents/devui-workspace/zwrt-datad-u60pro/src/main.c:33)，主循环最终写出的整份快照缓冲也只有 `char snap[RAW_MAX * 2]`，也就是 16KB，见 [`zwrt-datad-u60pro/src/main.c:564`](/Users/y/Documents/devui-workspace/zwrt-datad-u60pro/src/main.c:564)。这和文档里“最多 32 条短信、每条正文解码后进入 JSON”的目标不匹配；短信一旦恢复，快照很可能先被截断，然后前端再表现成“短信读不到/偶发解析失败”。
-
-- **短信解析还有一个结构性风险：当前 `json_get()` 不是严格 JSON parser，会命中字符串内容里的伪 key。**
-  `find_key()` 只是从头找下一个 `"`，然后比较后面的字面量 key，完全不跳过字符串和转义，见 [`u60pro-devui/src/json.c:13`](/Users/y/Documents/devui-workspace/u60pro-devui/src/json.c:13) 到 [`u60pro-devui/src/json.c:25`](/Users/y/Documents/devui-workspace/u60pro-devui/src/json.c:25)。这在短信场景尤其危险，因为 `text` 是任意用户内容；如果正文里出现形如 `\"unread\":0`、`\"date\":\"...\"` 这样的片段，后续对同一对象取 `unread` / `date` / `text` 都有机会拿错位置。
-
-- **短信点击动作目前绑定的是“列表下标”，不是稳定消息 ID，和 1Hz 刷新组合起来有竞态。**
-  列表生成时把每条短信渲染成 `act:sms:N`，这里的 `N` 只是当前页下标，见 [`u60pro-devui/src/htmlmain.c:1490`](/Users/y/Documents/devui-workspace/u60pro-devui/src/htmlmain.c:1490) 到 [`u60pro-devui/src/htmlmain.c:1508`](/Users/y/Documents/devui-workspace/u60pro-devui/src/htmlmain.c:1508)。点击后又会重新 `data_refresh()` 一次，再按 `sd.sms[idx]` 取正文，见 [`u60pro-devui/src/htmlmain.c:2555`](/Users/y/Documents/devui-workspace/u60pro-devui/src/htmlmain.c:2555) 到 [`u60pro-devui/src/htmlmain.c:2570`](/Users/y/Documents/devui-workspace/u60pro-devui/src/htmlmain.c:2570)。如果两次之间后端列表顺序变化（新短信插入、列表被重刷、条目数变化），就可能出现“点开的是另一条”或者“这次直接点不开”。
-
-- **前端短信正文和单对象解析也有固定上限，超长短信会被静默截断。**
-  当前前端每条短信正文只有 `text[700]`，见 [`u60pro-devui/include/data.h:47`](/Users/y/Documents/devui-workspace/u60pro-devui/include/data.h:47)；而解析单个短信对象时，中间缓冲也只有 `obj[1400]`，见 [`u60pro-devui/src/data.c:126`](/Users/y/Documents/devui-workspace/u60pro-devui/src/data.c:126) 到 [`u60pro-devui/src/data.c:136`](/Users/y/Documents/devui-workspace/u60pro-devui/src/data.c:136)。这不会制造常驻泄漏，但会让长正文表现成“只能读到前半截”甚至“对象后半段字段丢失”。
-
-- **目前没在我们自己的 C/C++ 代码里看到一个足以解释 `40MB -> 200MB` 的简单常驻泄漏点。**
-  已检查的动态分配路径主要在模板读取、外部内容通道、DRM 初始化和 litehtml 渲染壳层；C 侧大多都有对应 `free()` / `munmap()`。目前更像是“高频重建页面对象造成的 allocator high-water 增长”，不太像几行漏掉 `free()` 就能解释的线性泄漏。
-
-- **更可疑的内存增长来源，是主循环每秒都强制整页重渲染。**
-  主循环里只要不在拖动，就每秒 `need_render = 1`，见 [`u60pro-devui/src/htmlmain.c:2607`](/Users/y/Documents/devui-workspace/u60pro-devui/src/htmlmain.c:2607) 到 [`u60pro-devui/src/htmlmain.c:2612`](/Users/y/Documents/devui-workspace/u60pro-devui/src/htmlmain.c:2612)。每次重渲染都会：
-  1. 重新读一遍 HTML 模板文件，见 [`u60pro-devui/src/htmlmain.c:1647`](/Users/y/Documents/devui-workspace/u60pro-devui/src/htmlmain.c:1647) 到 [`u60pro-devui/src/htmlmain.c:1655`](/Users/y/Documents/devui-workspace/u60pro-devui/src/htmlmain.c:1655)
-  2. 重新 `document::createFromString(...)`
-  3. 重新 layout / draw 整个 litehtml 文档，见 [`u60pro-devui/src/html_view.cpp:311`](/Users/y/Documents/devui-workspace/u60pro-devui/src/html_view.cpp:311) 到 [`u60pro-devui/src/html_view.cpp:320`](/Users/y/Documents/devui-workspace/u60pro-devui/src/html_view.cpp:320)
-
-补充判断：
-
-- 我们自己这边的**静态常驻内存**并不大，肉眼可见的大块主要是几张离屏缓冲和滚动缓冲，量级大约几 MB，不足以单独解释额外一百多 MB 的上涨。
-- 所以如果现场看到 RSS 从约 40MB 长到约 200MB，优先怀疑的是“反复解析 HTML / 构建 litehtml DOM / allocator 不归还高水位”，而不是短信数组、JSON 缓冲这种固定大小对象。
-- 这个判断目前仍然是**静态代码审查推断**，不是运行时 heap profile 结论；要把“高水位”与“真泄漏”彻底区分开，还需要补一次实机采样（比如定时看 `VmRSS` / `VmData`，或者给渲染周期打更细的内存日志）。
-
-后续如果继续修，优先级建议是：
-
-- 先把 `zwrt-datad` 的短信生产链补回或核对清楚，否则前端再怎么修，部分用户仍会“完全看不到短信”。
-- 把短信点击从“下标寻址”改成“消息 ID 寻址”。
-- 把 `json_get()` 至少修到“不会命中字符串内部的转义引号”。
-- 评估把“每秒整页重建 DOM”改成“数据变化时再重建”，或至少缓存模板文本，减少反复分配。
-
-### 2026-06-25 修复后复查补记
-
-后续又做了一轮“修复后的代码 + 文档”复查，当前结论更新如下：
-
-- **短信生产链、快照缓冲、JSON key 扫描、短信按 ID 打开，这几项代码已经补上。**
-  当前仓库里：
-  - `zwrt-datad-u60pro/src/main.c` 已重新产出 `sms` 段，并缓存未读数和列表
-  - `RAW_MAX/SNAP_MAX` 等缓冲已显著放大
-  - `u60pro-devui/src/json.c` / `zwrt-datad-u60pro/src/json.c` 的 `find_key()` 已改成跳过字符串内容
-  - `u60pro-devui/src/htmlmain.c` 的短信列表与点击动作已从 `act:sms:N` 改成 `act:sms:ID`
-  - `u60pro-devui/src/html_view.cpp` 里已在新建 `litehtml::document` 前先 `g_doc.reset()`
-
-- **当前剩下最值得优先处理的代码风险，是页面 HTML 渲染缓存和息屏/唤醒流程之间的交互。**
-  `render()` 里如果判定 `reuse`，会直接跳过 `html_view_render_html()`，见 [`u60pro-devui/src/htmlmain.c:1850`](/Users/y/Documents/devui-workspace/u60pro-devui/src/htmlmain.c:1850) 到 [`u60pro-devui/src/htmlmain.c:1874`](/Users/y/Documents/devui-workspace/u60pro-devui/src/htmlmain.c:1874)。但 `screen_off()` 会先把整块 framebuffer 清黑，见 [`u60pro-devui/src/htmlmain.c:2044`](/Users/y/Documents/devui-workspace/u60pro-devui/src/htmlmain.c:2044) 到 [`u60pro-devui/src/htmlmain.c:2048`](/Users/y/Documents/devui-workspace/u60pro-devui/src/htmlmain.c:2048)；随后 `screen_on()` 只是再次调用 `render()`，见 [`u60pro-devui/src/htmlmain.c:2053`](/Users/y/Documents/devui-workspace/u60pro-devui/src/htmlmain.c:2053) 到 [`u60pro-devui/src/htmlmain.c:2057`](/Users/y/Documents/devui-workspace/u60pro-devui/src/htmlmain.c:2057)。如果此时命中 `reuse`，页面主体有机会不重画，只剩状态栏 / 原生覆盖层被补上。这个点更像是新增缓存带来的显示回归，需要实机确认并大概率要在唤醒前主动失效缓存。
-
-- **文档现在有几处明显过期，已经和当前代码不一致。**
-  主要是：
-  - 本文件开头这段“本地 Review 记录（内存 / 短信）”仍保留了修复前结论，例如“后端没有 `sms` 段”“短信仍按下标打开”“每秒强制整页重渲染”等，这些都已经不再准确。
-  - 本文件“短信（只读）”章节仍写的是 `act:sms:N`，见 [`u60pro-devui/docs/DEVELOPMENT.md:416`](/Users/y/Documents/devui-workspace/u60pro-devui/docs/DEVELOPMENT.md:416)。
-  - `u60pro-devui/docs/UI-GUIDE.md` 里的 `{{SMSLIST}}` 说明也仍写 `act:sms:N`，见 [`u60pro-devui/docs/UI-GUIDE.md:108`](/Users/y/Documents/devui-workspace/u60pro-devui/docs/UI-GUIDE.md:108)。
-
-- **当前“状态变化才重渲染”的思路已经落地，但也连带改变了“前端热更新”的行为边界。**
-  `render()` 现在会按 HTML 内容做复用，而模板/CSS 本身又各自带 mtime 缓存；这样虽然明显减少了无意义重建，但 `style.css` 改动如果没有伴随 HTML/状态变化，可能不会立刻反映到屏幕上。这个更像行为变化，不一定是 bug，但文档如果还宣传“改完样式立即热生效”，就需要同步说清楚实际触发条件。
-
-- **随后又补了一层缓存失效：息屏清黑后会主动清空页面 HTML 复用缓存，并把 `style.css` 的 mtime 也纳入复用判定。**
-  这样做是为了避免两类回归：
-  - 亮屏时正文误命中旧缓存，导致黑屏后只补画状态栏
-  - 只改 `style.css`、HTML 本身没变时，页面长期不触发重排
-  当前实现位置在 `u60pro-devui/src/htmlmain.c` 的 `invalidate_render_html_cache()`、`render()` 和 `screen_off()`。
+- 本文只保留公开可分享的架构、构建、硬件接口和 UI 行为说明。
+- 本地设备连接、SSH、编译机地址、实机日志和临时部署记录不进入仓库，边界规则见 [`REPO_BOUNDARY.md`](REPO_BOUNDARY.md)。
+- 第二页、基站信息卡、`Ports/SSB/TA/Grant/RB` 等 modem/信令页面行为统一整理到 [`modem.md`](modem.md)。
 
 ## 项目目标
 
@@ -124,7 +43,7 @@ ubus 服务 ──▶ zwrt-datad ──▶ HTTP /state + SSE /events ──▶ u
 
 当前六页（左右滑动，底部圆点指示；`menu.html` 为电源长按覆盖层）。**页面按文件名编号排序**——v0.3.5 在信号页后插入短信页，其余顺延，所以编号从 v0.3.4 的 `02-wifi/03-lock/04-charts/05-system` 改成了下面这套（**改名是后面那个「插件更新残留」坑的根因**，见版本机制一节）：
 
-- **01-signal.html — 信号**：状态栏；运营商 + 制式，右上角 QCI/AMBR；按载波分卡片（`频段·频宽 / EARFCN / PCI / RSRP / SINR`，按质量上色、未激活置灰）。表头随组网模式（`5G SA / 5G NSA / EN-DC / 4G`）变化并显示 `L LTE + M NR 载波 · 总X MHz`。
+- **01-signal.html — 信号**：状态栏；运营商 + 制式，右上角 QCI/AMBR；按载波分卡片（`频段·频宽 / EARFCN / PCI / RSRP / SINR`，按质量上色、未激活置灰）。当 datad 输出 `net.HSR=true` 时，主信号卡片会切换为紫色高铁模式并显示“高铁模式”；`mcc == 460` 且 NR ARFCN 不在已知大网频点表时，单个 NR 载波卡片会染紫并标注“高铁专网”作为疑似提示。真正 `HSR` 仍以 datad 信令确认为准。表头随组网模式（`5G SA / 5G NSA / EN-DC / 4G`）变化并显示 `L LTE + M NR 载波 · 总X MHz`。
 - **02-sms.html — 短信（只读）**：折叠卡片列表，每条号码/时间 + 一行预览；点卡片弹二级页看全文并标记已读。详见下方「短信（只读）」。
 - **03-wifi.html — WiFi**：SSID、密码（默认打码）、加密；WiFi 总开关 / 2.4G / 5G / 节能(PSM) / NFC 开关；已连接设备列表（在线过滤）；DHCP 信息（地址池实时由 uci 算）。
 - **04-lock.html — 锁频**：选网方式分段控件 + 5G SA / 5G NSA / 4G 三张锁频卡（点开二级弹窗，频段芯片一行四个）+ 恢复默认。
@@ -186,6 +105,7 @@ ubus 服务 ──▶ zwrt-datad ──▶ HTTP /state + SSE /events ──▶ u
   - **`lteca` 格式**有两种：新格式与 `nrca` 同样是 11 字段；旧格式是 5 字段 `pci, band, is_scc, earfcn, bw`。旧格式本身不带 `RSRP/SINR`，这些值会单独出现在 `ltecasig`。
   - **`ltecasig` 格式**（实测）通常为每组 `rsrp, rsrq, sinr, rssi, ?, ?`；并且组数可能比 `lteca` 少 1，因为它只包含 `SCC`，不包含 `PCell`。UI 规则是：第一张 LTE 卡片使用主小区 `lte_*` 字段，后续 LTE SCC 按顺序消费 `ltecasig`。
   - **没有载波聚合时 `nrca`/`lteca`/`ltecasig` 是空串**——此时信号页只有主载波一张卡片，属正常，不是 bug。CA 激活后副载波卡片自动出现。
+  - **高铁模式**：`net.HSR=true` 由 datad 根据信令确认，UI 会把第一页主信号卡片切换为紫色并显示“高铁模式”。实机预览可临时用 `DEVUI_FORCE_HSR=1` 或 `/tmp/u60-force-hsr` 强制模拟；正常运行没有这些开关时仍只以 datad 为准。NR 大网 ARFCN 表为 `428910,176190,190830,152650,504990,524910,620640,627264,633984,723360,721824`；UI 只在 `mcc == 460` 且 NR ARFCN 不在表内时给单个 NR 载波卡片染紫作为疑似提示，这不是 `net.HSR` 真值来源。
   - 另含 `net_select`（选网模式）与 `sa_bands`/`nsa_bands`/`lte_bands`（各制式可用/已锁频段，逗号列表，透传自 netinfo），供锁频页读取/写回。
 - `battery`：电量、温度、充电状态、`charger_connect`；以及 `chg_uv`/`chg_ua`（充电器输入电压µV/电流µA，读 `/sys/class/power_supply/usb`）、`bat_uv`/`bat_ua`（电池，读 `.../battery`）——UI 据此显示电压电流并算充/放电功率。
 - `clients`：接入设备数 + `list`（DHCP 租约设备名/IP/MAC，解析 `/tmp/dhcp.leases`）。
@@ -540,7 +460,7 @@ cp u60pro-devui.stripped u60pro-devui-aarch64
 本轮不是替换正式文件，而是把测试二进制先推到设备 `/tmp` 做最小闭环验证，避免污染正式安装目录 `/data/plugins/...`。
 
 - 本地构建：
-  - `zwrt-datad-u60pro/u60-datad.zigtest`
+  - `zwrt-datad/zwrt-datad.zigtest`
   - `u60pro-devui/html-poc.zigtest`
 - 推送方式：设备侧没有 `scp`，改用 `ssh` stdin 直接写入 `/tmp/u60-datad.zigtest` 和 `/tmp/html-poc.zigtest`
 - 测试步骤：
@@ -569,6 +489,7 @@ cp u60pro-devui.stripped u60pro-devui-aarch64
 - 语义约定：
   - `refresh_ms > 0`：持续接收 SSE 最新快照，但只按该间隔把最新 live 状态提交到页面并触发重绘
   - `refresh_ms = 0`：暂停把 live 状态刷进页面，但分钟级时钟仍继续刷新
+- 同步约定：DevUI 会把该档位同步下发到 datad `/modem/control?poll_ms=...`；在支持 modem 信令 side-channel 的 datad 版本中，这个值也会同步控制信令 pump / 解析节奏。
 - 这样用户可以在“更实时”和“更省资源/更稳”之间自己取舍。
 
 ## 2026-06-25 锁频页短距离左滑回弹后混入图表页残影
@@ -583,3 +504,7 @@ cp u60pro-devui.stripped u60pro-devui-aarch64
 - 载波汇总显示补充：信号页“已连接载波 / 总 MHz”统计现在按**展示出来的载波卡片**计算，未激活但已配置的载波也会计入数量与带宽汇总，并继续保留灰色“未激活”标记。与此同时，`5GA / 5G+ / 5G` 判定仍只使用活跃载波统计，避免因为把未激活载波计入展示汇总而误判制式角标。
 - 更正：`5GA / 5G+ / 5G` 角标也按**展示出来的 NR 载波与带宽**判断，而不只看当前活跃载波。这样像 `SA n78+n78` 但第二个 `n78` 处于未激活状态时，仍然可以按双载波 / 200MHz 能力显示 `5GA`。
 - 刷新间隔卡片后续移除了 `0.5s` 档位，只保留 `停止 / 1s / 2s / 5s`。原因是当前设备上的 `u60-datad` 仍以 `-i 1000` 运行，前端即便切到 SSE，数据源本身默认也只会以秒级节奏产出完整新快照；`0.5s` 只会增加 UI 提交频率，却不会带来更快的真实数据。兼容上，旧配置里若残留 `refresh_ms=500`，启动时会自动归一到 `1000`。
+
+## 2026-07-03 modem 页面整理
+- 第二页、基站信息卡、`Signal Metrics` 对接、`Ports/SSB/Serving SSB/Grant/RB/TA` 这些页面行为说明，已经从本文末尾移出，统一整理到 [`modem.md`](modem.md)。
+- 本文档从这里开始不再继续堆放 modem/信令页的排障流水账，后续只保留通用 UI 开发内容。

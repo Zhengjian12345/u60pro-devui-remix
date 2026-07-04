@@ -374,6 +374,7 @@ public:
 static fb_container   *g_container;
 static document::ptr   g_doc;
 static int             g_scroll_y;   /* vertical scroll offset (logical px) */
+static int             g_doc_overlay; /* overlay docs are already in screen coords */
 
 extern "C" void html_view_init(uint16_t *fb, int w, int h, int pitch_px, int rotate, const char *font_path)
 {
@@ -394,6 +395,7 @@ extern "C" int html_view_render_html(const char *html)
     if (!doc) return -1;
 
     g_doc = doc;
+    g_doc_overlay = 0;
     g_doc->render((pixel_t)g_w);
     for (int i = 0; i < g_pitch_px * g_h; i++) g_fb[i] = 0;
     position clip(0, 0, (pixel_t)g_w, (pixel_t)g_h);
@@ -414,6 +416,7 @@ extern "C" int html_view_render_overlay(const char *html)
     if (!doc) return -1;
 
     g_doc = doc;
+    g_doc_overlay = 1;
     g_doc->render((pixel_t)g_w);
     position clip(0, 0, (pixel_t)g_w, (pixel_t)g_h);
     g_doc->draw((uint_ptr)0, 0, 0, &clip);
@@ -608,7 +611,7 @@ extern "C" const char *html_view_click(float x, float y)
     g_clicked.clear();
     if (g_doc) {
         position::vector rb;
-        float yy = y + g_scroll_y;   /* content is shifted up by scroll */
+        float yy = y + (g_doc_overlay ? 0 : g_scroll_y);
         g_doc->on_lbutton_down(x, yy, x, yy, rb);
         g_doc->on_lbutton_up(x, yy, x, yy, rb);
     }
@@ -650,7 +653,8 @@ extern "C" int html_view_rect(const char *sel, int *x, int *y, int *w, int *h)
     element::ptr el = root->select_one(sel);
     if (!el) return 0;
     position p = el->get_placement();
-    *x = (int)p.x; *y = (int)p.y - g_scroll_y; *w = (int)p.width; *h = (int)p.height;
+    int sy = g_doc_overlay ? 0 : g_scroll_y;
+    *x = (int)p.x; *y = (int)p.y - sy; *w = (int)p.width; *h = (int)p.height;
     return (*w > 1 && *h > 1);
 }
 
