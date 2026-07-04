@@ -770,20 +770,20 @@ static void save_conf(void)
     fclose(fp);
 }
 
-static int nr_arfcn_is_macro_mainland(long arfcn)
+static int hsr_freq_is_whitelist(long arfcn)
 {
-    static const long macro_arfcn[] = {
-        428910, 176190, 190830, 152650, 504990, 524910,
-        620640, 627264, 633984, 723360, 721824
+    static const long hsr_arfcn[] = {
+        507150, 527070, 531390, 153370,
+        505230, 627744, 634464, 423630
     };
 
-    for (size_t i = 0; i < sizeof(macro_arfcn) / sizeof(macro_arfcn[0]); i++)
-        if (arfcn == macro_arfcn[i])
+    for (size_t i = 0; i < sizeof(hsr_arfcn) / sizeof(hsr_arfcn[0]); i++)
+        if (arfcn == hsr_arfcn[i])
             return 1;
     return 0;
 }
 
-static int nr_hsr_freq_hint(int mcc, const char *arfcn)
+static int hsr_freq_hint(int mcc, const char *arfcn)
 {
     char *end = NULL;
     long v;
@@ -793,7 +793,7 @@ static int nr_hsr_freq_hint(int mcc, const char *arfcn)
     v = strtol(arfcn, &end, 10);
     if (end == arfcn || v <= 0)
         return 0;
-    return !nr_arfcn_is_macro_mainland(v);
+    return hsr_freq_is_whitelist(v);
 }
 
 /* Append one carrier card (band/bw + PCI, then RSRP/SINR colored by quality).
@@ -2674,7 +2674,7 @@ static int build_kv(struct kv *t, const char *path)
         snprintf(rp, sizeof rp, "%d", d.nr_rsrp); snprintf(pc, sizeof pc, "%d", d.nr_pci);
         snprintf(ac, sizeof ac, "%ld", d.nr_channel);
         no = car_row(s_nrrows, no, sizeof s_nrrows, nr_band, d.nr_bw, ac, pc, rp, d.nr_snr,
-                     nr_hsr_freq_hint(d.mcc, ac));
+                     hsr_freq_hint(d.mcc, ac));
         nr_show_cc = 1; nr_show_bw = atoi(d.nr_bw);
         if (!carrier_is_inactive(rp)) { nr_cc = 1; nr_bw = atoi(d.nr_bw); }
     }
@@ -2689,7 +2689,7 @@ static int build_kv(struct kv *t, const char *path)
                 const char *nr_ac = nf > 4 ? f[4] : "-";
                 no = car_row(s_nrrows, no, sizeof s_nrrows, bn, f[5], nr_ac,
                              nf > 1 ? f[1] : "-", nf > 7 ? f[7] : "-", nf > 9 ? f[9] : "-",
-                             nr_hsr_freq_hint(d.mcc, nr_ac));
+                             hsr_freq_hint(d.mcc, nr_ac));
                 nr_show_cc++;
                 nr_show_bw += atoi(f[5]);
                 if (rpv > -140.0) { nr_cc++; nr_bw += atoi(f[5]); }
@@ -2743,7 +2743,7 @@ static int build_kv(struct kv *t, const char *path)
                     if (d.lte_snr[0]) snprintf(ls, sizeof ls, "%s", d.lte_snr);
                 }
                 lo = car_row(s_lterows, lo, sizeof s_lterows, bn, f_bw, f_arfcn ? f_arfcn : "-",
-                             f_pci ? f_pci : "-", lr, ls, 0);
+                             f_pci ? f_pci : "-", lr, ls, hsr_freq_hint(d.mcc, f_arfcn));
                 lte_show_cc++;
                 lte_show_bw += atoi(f_bw);
                 if (!carrier_is_inactive(lr)) { lte_cc++; lte_bw += atoi(f_bw); }

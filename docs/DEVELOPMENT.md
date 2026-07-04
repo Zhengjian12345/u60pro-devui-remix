@@ -43,7 +43,7 @@ ubus 服务 ──▶ zwrt-datad ──▶ HTTP /state + SSE /events ──▶ u
 
 当前六页（左右滑动，底部圆点指示；`menu.html` 为电源长按覆盖层）。**页面按文件名编号排序**——v0.3.5 在信号页后插入短信页，其余顺延，所以编号从 v0.3.4 的 `02-wifi/03-lock/04-charts/05-system` 改成了下面这套（**改名是后面那个「插件更新残留」坑的根因**，见版本机制一节）：
 
-- **01-signal.html — 信号**：状态栏；运营商 + 制式，右上角 QCI/AMBR；按载波分卡片（`频段·频宽 / EARFCN / PCI / RSRP / SINR`，按质量上色、未激活置灰）。当 datad 输出 `net.HSR=true` 时，主信号卡片会切换为紫色高铁模式并显示“高铁模式”；`mcc == 460` 且 NR ARFCN 不在已知大网频点表时，单个 NR 载波卡片会染紫并标注“高铁专网”作为疑似提示。真正 `HSR` 仍以 datad 信令确认为准。表头随组网模式（`5G SA / 5G NSA / EN-DC / 4G`）变化并显示 `L LTE + M NR 载波 · 总X MHz`。
+- **01-signal.html — 信号**：状态栏；运营商 + 制式，右上角 QCI/AMBR；按载波分卡片（`频段·频宽 / EARFCN / PCI / RSRP / SINR`，按质量上色、未激活置灰）。当 datad 输出 `net.HSR=true` 时，主信号卡片会切换为紫色高铁模式并显示“高铁模式”；`mcc == 460` 且载波 `EARFCN/ARFCN` 命中高铁专网白名单 `507150, 527070, 531390, 153370, 505230, 627744, 634464, 423630` 时，单个 LTE/NR 载波卡片会染紫并标注“高铁专网”。真正 `HSR` 仍以 datad 信令确认为准。表头随组网模式（`5G SA / 5G NSA / EN-DC / 4G`）变化并显示 `L LTE + M NR 载波 · 总X MHz`。
 - **02-sms.html — 短信（只读）**：折叠卡片列表，每条号码/时间 + 一行预览；点卡片弹二级页看全文并标记已读。详见下方「短信（只读）」。
 - **03-wifi.html — WiFi**：SSID、密码（默认打码）、加密；WiFi 总开关 / 2.4G / 5G / 节能(PSM) / NFC 开关；已连接设备列表（在线过滤）；DHCP 信息（地址池实时由 uci 算）。
 - **04-lock.html — 锁频**：选网方式分段控件 + 5G SA / 5G NSA / 4G 三张锁频卡（点开二级弹窗，频段芯片一行四个）+ 恢复默认。
@@ -105,7 +105,7 @@ ubus 服务 ──▶ zwrt-datad ──▶ HTTP /state + SSE /events ──▶ u
   - **`lteca` 格式**有两种：新格式与 `nrca` 同样是 11 字段；旧格式是 5 字段 `pci, band, is_scc, earfcn, bw`。旧格式本身不带 `RSRP/SINR`，这些值会单独出现在 `ltecasig`。
   - **`ltecasig` 格式**（实测）通常为每组 `rsrp, rsrq, sinr, rssi, ?, ?`；并且组数可能比 `lteca` 少 1，因为它只包含 `SCC`，不包含 `PCell`。UI 规则是：第一张 LTE 卡片使用主小区 `lte_*` 字段，后续 LTE SCC 按顺序消费 `ltecasig`。
   - **没有载波聚合时 `nrca`/`lteca`/`ltecasig` 是空串**——此时信号页只有主载波一张卡片，属正常，不是 bug。CA 激活后副载波卡片自动出现。
-  - **高铁模式**：`net.HSR=true` 由 datad 根据信令确认，UI 会把第一页主信号卡片切换为紫色并显示“高铁模式”。实机预览可临时用 `DEVUI_FORCE_HSR=1` 或 `/tmp/u60-force-hsr` 强制模拟；正常运行没有这些开关时仍只以 datad 为准。NR 大网 ARFCN 表为 `428910,176190,190830,152650,504990,524910,620640,627264,633984,723360,721824`；UI 只在 `mcc == 460` 且 NR ARFCN 不在表内时给单个 NR 载波卡片染紫作为疑似提示，这不是 `net.HSR` 真值来源。
+  - **高铁模式**：`net.HSR=true` 由 datad 根据信令确认，UI 会把第一页主信号卡片切换为紫色并显示“高铁模式”。实机预览可临时用 `DEVUI_FORCE_HSR=1` 或 `/tmp/u60-force-hsr` 强制模拟；正常运行没有这些开关时仍只以 datad 为准。载波卡片上的紫色“高铁专网”提示改为白名单制：仅当 `mcc == 460` 且 `EARFCN/ARFCN` 命中 `507150, 527070, 531390, 153370, 505230, 627744, 634464, 423630` 时才染紫，这不是 `net.HSR` 真值来源。
   - 另含 `net_select`（选网模式）与 `sa_bands`/`nsa_bands`/`lte_bands`（各制式可用/已锁频段，逗号列表，透传自 netinfo），供锁频页读取/写回。
 - `battery`：电量、温度、充电状态、`charger_connect`；以及 `chg_uv`/`chg_ua`（充电器输入电压µV/电流µA，读 `/sys/class/power_supply/usb`）、`bat_uv`/`bat_ua`（电池，读 `.../battery`）——UI 据此显示电压电流并算充/放电功率。
 - `clients`：接入设备数 + `list`（DHCP 租约设备名/IP/MAC，解析 `/tmp/dhcp.leases`）。
@@ -421,8 +421,8 @@ esac
 ```jsonc
 // 本仓库 release 的 version.json
 { "schema": 1,
-  "devui": { "version": "1.2.3", "asset": "u60pro-devui-aarch64" },
-  "ui":    { "version": "0.4.4", "asset": "ui.tar.gz" } }
+  "devui": { "version": "1.2.5", "asset": "u60pro-devui-aarch64" },
+  "ui":    { "version": "0.4.5", "asset": "ui.tar.gz" } }
 // zwrt-datad release 的 version.json
 { "schema": 1, "datad": { "version": "0.6.2", "asset": "zwrt-datad-aarch64" } }
 ```

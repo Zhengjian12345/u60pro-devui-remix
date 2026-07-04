@@ -1,9 +1,9 @@
 {
   "schema": 1,
   "devui": {
-    "version": "1.2.4",
+    "version": "1.2.5",
     "asset": "u60pro-devui-aarch64",
-    "notes": "新增高铁模式显示、信令刷新同步与公开仓库边界整理"
+    "notes": "高铁专网频点提示改为白名单制，并补齐高铁模式文档与发布说明"
   },
   "ui": {
     "version": "0.4.5",
