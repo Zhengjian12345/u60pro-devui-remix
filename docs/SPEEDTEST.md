@@ -1,0 +1,81 @@
+# Optional speedtest integration
+
+This document describes the optional `better-speedtest` integration in `u60pro-devui`.
+
+## Current model
+
+- DevUI does not bundle the `better-speedtest` binary.
+- DevUI does not install a standalone speedtest page by default.
+- If `/data/plugins/better-speedtest/better-speedtest` exists and is executable, the first page shows a `网络测速` toggle below the signal cards.
+- Tapping `网络测速` expands the speedtest panel inline on the first page. Tapping `收起测速` collapses it.
+- Removing the speedtest backend hides the entry button automatically.
+- The old optional `07-speedtest.html` standalone page has been removed. Do not ship or install it for the current inline UX.
+
+## Runtime paths
+
+- Binary: `/data/plugins/better-speedtest/better-speedtest`
+- Log: `/tmp/better-speedtest.log`
+- DevUI config: `/data/plugins/u60pro-devui/devui.conf`
+
+DevUI only stores small UI preferences in `devui.conf`:
+
+- `st_src`
+- `st_dir`
+- `st_dur`
+
+DevUI does not rewrite `better-speedtest`'s own `config.json`.
+
+## Actions
+
+The inline panel uses these `act:` commands:
+
+- `act:sttoggle`: expand or collapse the first-page speedtest panel.
+- `act:ststart`: run `better-speedtest test --json` with the selected source, direction, and duration.
+- `act:ststop`: kill the running `better-speedtest` process and reset the speedtest state.
+- `act:stsrc:<mode>`: select source, currently `auto`, `cnspeed`, `ookla`, or `cdn`.
+- `act:stdir:<mode>`: select direction, currently `both`, `dl`, or `ul`.
+- `act:stdur:<sec>`: select duration, currently `10`, `15`, or `20`.
+
+`act:stpage` and `act:stclose` may remain accepted for compatibility with older templates, but the current UI should not depend on a standalone speedtest page.
+
+## Rendering notes
+
+Speedtest visuals are hybrid-rendered:
+
+- HTML/CSS lays out the panel, option buttons, empty gauge placeholder, and empty chart placeholders.
+- Native drawing in `htmlmain.c` paints the circular gauge, pointer, live speed number, and two line charts.
+- Native drawing is clipped below the 26 px status bar so dragging the page cannot paint over the status bar.
+- Horizontal swipe previews render pages at the current scroll position and draw native chart layers into the preview buffers, so charts do not disappear during page swipes.
+- Chart under-fill uses deterministic non-alpha fill to avoid dark/light flicker from repeated translucent blending.
+
+## Install and uninstall convention
+
+Install `better-speedtest` independently:
+
+```sh
+mkdir -p /data/plugins/better-speedtest
+cp better-speedtest /data/plugins/better-speedtest/better-speedtest
+chmod +x /data/plugins/better-speedtest/better-speedtest
+```
+
+No UI file copy is required for the current inline speedtest panel. The DevUI binary and default UI templates already contain the optional entry point; it only appears when the backend binary is present.
+
+To uninstall the optional speedtest backend:
+
+```sh
+rm -f /data/plugins/better-speedtest/better-speedtest
+rm -f /tmp/better-speedtest.log
+```
+
+If an old deployment still has standalone page files, remove them so the deleted page does not reappear:
+
+```sh
+rm -f /data/plugins/u60pro-devui/ui/07-speedtest.html
+rm -f /data/plugins/u60pro-devui/ui/speedtest.css
+```
+
+## Public repository boundary
+
+The DevUI repository may document and implement the optional integration, but it should not include private device logs, local SSH targets, local screenshots, framebuffer dumps, or the `better-speedtest` binary itself.
+
+The `zwrt-datad` repository remains unrelated to speedtest execution. The speedtest backend is an independent optional plugin under `/data/plugins/better-speedtest/`.

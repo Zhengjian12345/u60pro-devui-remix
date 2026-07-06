@@ -508,3 +508,7 @@ cp u60pro-devui.stripped u60pro-devui-aarch64
 ## 2026-07-03 modem 页面整理
 - 第二页、基站信息卡、`Signal Metrics` 对接、`Ports/SSB/Serving SSB/Grant/RB/TA` 这些页面行为说明，已经从本文末尾移出，统一整理到 [`modem.md`](modem.md)。
 - 本文档从这里开始不再继续堆放 modem/信令页的排障流水账，后续只保留通用 UI 开发内容。
+
+## Optional speedtest integration
+
+The current speedtest UX is documented in [`SPEEDTEST.md`](SPEEDTEST.md). In short: DevUI does not bundle `better-speedtest`; when `/data/plugins/better-speedtest/better-speedtest` is executable, the first page shows an inline `网络测速` toggle below the signal cards. The old standalone `07-speedtest.html` page has been removed and should not be shipped in current UI packages.

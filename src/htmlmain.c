@@ -35,11 +35,15 @@ extern void        html_view_init(uint16_t *fb, int w, int h, int pitch_px, int 
 extern void        html_view_set_uidir(const char *dir);
 extern int         html_view_render_html(const char *html);
 extern int         html_view_render_to(uint16_t *buf, const char *html);
+extern int         html_view_render_to_scroll(uint16_t *buf, const char *html, int scroll);
+extern void        html_view_target_begin(uint16_t *buf, int scroll);
+extern void        html_view_target_end(void);
 extern const char *html_view_click(float x, float y);
 extern int         html_view_rect(const char *sel, int *x, int *y, int *w, int *h);
 extern void        html_view_polyline(int x, int y, int w, int h, const int *vals, int n,
                                       int vmin, int vmax, int r, int g, int b, int thick, int fill_a);
 extern void        html_view_set_scroll(int y);
+extern void        html_view_set_clip_top(int y);
 extern void        html_view_fill_rect(int x, int y, int w, int h, int r, int g, int b, int a);
 extern void        html_view_fill_poly(const int *xs, const int *ys, int n, int r, int g, int b, int a);
 extern void        html_view_fill_round_rect(int x, int y, int w, int h, int rad, int r, int g, int b, int a);
@@ -104,6 +108,22 @@ static int  g_refresh_ms = 1000; /* state refresh interval, 0 = paused */
 static int  g_sig_read;   /* ML1/raw signaling read switch */
 static int  g_sig_parse;  /* decoded LTE/NR signaling parse switch + page visibility */
 static int  g_saved_bright = -1; /* persisted backlight level, -1 = none yet */
+enum { ST_STATE_MISSING = 0, ST_STATE_IDLE, ST_STATE_RUNNING, ST_STATE_DONE, ST_STATE_FAIL };
+#define SPEEDTEST_BIN "/data/plugins/better-speedtest/better-speedtest"
+#define SPEEDTEST_LOG "/tmp/better-speedtest.log"
+static char g_st_src[16] = "auto";
+static char g_st_dir[8] = "both";
+static int  g_st_dur = 15;
+static int  g_st_state = ST_STATE_MISSING;
+static int  g_st_installed = -1;
+static int  g_st_have_result;
+static uint32_t g_st_poll_at;
+static char g_st_phase[24], g_st_msg[160], g_st_err[160];
+static char g_st_node[96], g_st_source[32], g_st_carrier[32], g_st_city[32], g_st_ulmsg[96];
+static double g_st_cur_mbps, g_st_cur_peak;
+static double g_st_dl_avg, g_st_dl_peak, g_st_ul_avg, g_st_ul_peak, g_st_ping, g_st_jitter;
+#define ST_HIST 48
+static int g_st_dl_hist[ST_HIST], g_st_ul_hist[ST_HIST], g_st_dl_n, g_st_ul_n;
 static int g_last_clock_min = -1;       /* HH:MM changes only once per minute */
 static char g_render_html_cache[PAGE_HTML_CACHE_CAP];
 static size_t g_render_html_cache_len;
@@ -113,6 +133,8 @@ static int g_render_html_cache_modal;
 static long g_render_html_cache_sms_open;
 static int g_render_html_cache_lock;
 static long long g_render_html_cache_css_mtime = -1;
+static long long g_pages_dir_mtime = -1;
+static uint32_t g_pages_scan_at;
 static int normalize_refresh_ms(int ms);
 
 /* ---- page-2 aux state, cached (-1 = unknown). Like the reference plugin,
@@ -352,6 +374,7 @@ static void fmt_speed_pair(char *buf, size_t cap, long up, long down, int bits) 
 
 /* ---- {{key}} template substitution ---- */
 struct kv { const char *k; const char *v; };
+static void html_esc(char *dst, size_t cap, const char *src);
 
 static char *apply_template(const char *tmpl, struct kv *t, int n)
 {
@@ -412,6 +435,18 @@ static long long file_mtime_ns(const char *path)
     struct stat st;
     if (stat(path, &st) != 0) return -1;
     return (long long)st.st_mtime * 1000000000LL + (long long)st.st_mtim.tv_nsec;
+}
+
+static int rescan_pages_if_changed(void)
+{
+    long long mtime = file_mtime_ns(UI_DIR);
+    if (mtime < 0 || mtime == g_pages_dir_mtime) return 0;
+    g_pages_dir_mtime = mtime;
+    rescan_pages_keep_current();
+    g_render_html_cache_len = 0;
+    g_render_html_cache_path[0] = 0;
+    g_render_html_cache_css_mtime = -1;
+    return 1;
 }
 
 static const char *read_template_cached(const char *path)
@@ -746,7 +781,7 @@ static void load_conf(void)
 {
     FILE *fp = fopen(CONF_FILE, "r");
     if (!fp) return;
-    char line[64]; int v;
+    char line[64], sval[16]; int v;
     while (fgets(line, sizeof line, fp)) {
         if      (sscanf(line, "theme=%d", &v) == 1)      g_theme = !!v;
         else if (sscanf(line, "speed_bits=%d", &v) == 1) g_speed_bits = !!v;
@@ -756,6 +791,9 @@ static void load_conf(void)
         else if (sscanf(line, "sig_read=%d", &v) == 1)   g_sig_read = !!v;
         else if (sscanf(line, "sig_parse=%d", &v) == 1)  g_sig_parse = !!v;
         else if (sscanf(line, "bright=%d", &v) == 1)     g_saved_bright = v;
+        else if (sscanf(line, "st_src=%15s", sval) == 1) snprintf(g_st_src, sizeof g_st_src, "%s", sval);
+        else if (sscanf(line, "st_dir=%15s", sval) == 1) snprintf(g_st_dir, sizeof g_st_dir, "%s", sval);
+        else if (sscanf(line, "st_dur=%d", &v) == 1)     g_st_dur = v;
     }
     fclose(fp);
 }
@@ -764,10 +802,584 @@ static void save_conf(void)
     FILE *fp = fopen(CONF_FILE, "w");
     if (!fp) return;
     fprintf(fp,
-            "theme=%d\nspeed_bits=%d\nshow_batpct=%d\nautooff=%d\nrefresh_ms=%d\nsig_read=%d\nsig_parse=%d\nbright=%d\n",
+            "theme=%d\nspeed_bits=%d\nshow_batpct=%d\nautooff=%d\nrefresh_ms=%d\nsig_read=%d\nsig_parse=%d\nbright=%d\nst_src=%s\nst_dir=%s\nst_dur=%d\n",
             g_theme, g_speed_bits, g_show_batpct, g_autooff_ms, g_refresh_ms,
-            g_sig_read, g_sig_parse, backlight_get());
+            g_sig_read, g_sig_parse, backlight_get(), g_st_src, g_st_dir, g_st_dur);
     fclose(fp);
+}
+
+static const char *speedtest_norm_src(const char *src)
+{
+    if (!strcmp(src, "cnspeed")) return "cnspeed";
+    if (!strcmp(src, "ookla")) return "ookla";
+    if (!strcmp(src, "cdn")) return "cdn";
+    return "auto";
+}
+
+static const char *speedtest_norm_dir(const char *dir)
+{
+    if (!strcmp(dir, "dl")) return "dl";
+    if (!strcmp(dir, "ul")) return "ul";
+    return "both";
+}
+
+static int speedtest_norm_dur(int sec)
+{
+    if (sec == 10 || sec == 15 || sec == 20) return sec;
+    return 15;
+}
+
+static void speedtest_apply_saved_prefs(void)
+{
+    snprintf(g_st_src, sizeof g_st_src, "%s", speedtest_norm_src(g_st_src));
+    snprintf(g_st_dir, sizeof g_st_dir, "%s", speedtest_norm_dir(g_st_dir));
+    g_st_dur = speedtest_norm_dur(g_st_dur);
+}
+
+static int speedtest_binary_ready(void)
+{
+    return access(SPEEDTEST_BIN, X_OK) == 0;
+}
+
+static int speedtest_running(void)
+{
+    return system("pidof better-speedtest >/dev/null 2>&1") == 0;
+}
+
+static void speedtest_clear_data(void)
+{
+    g_st_have_result = 0;
+    g_st_phase[0] = 0;
+    g_st_msg[0] = 0;
+    g_st_err[0] = 0;
+    g_st_node[0] = 0;
+    g_st_source[0] = 0;
+    g_st_carrier[0] = 0;
+    g_st_city[0] = 0;
+    g_st_ulmsg[0] = 0;
+    g_st_cur_mbps = g_st_cur_peak = 0;
+    g_st_dl_avg = g_st_dl_peak = 0;
+    g_st_ul_avg = g_st_ul_peak = 0;
+    g_st_ping = g_st_jitter = 0;
+}
+
+static void speedtest_hist_clear(void)
+{
+    g_st_dl_n = 0;
+    g_st_ul_n = 0;
+}
+
+static void speedtest_hist_push(int *hist, int *n, double mbps)
+{
+    int v;
+    if (mbps < 0.0) mbps = 0.0;
+    v = (int)(mbps * 10.0 + 0.5);
+    if (*n < ST_HIST) {
+        hist[(*n)++] = v;
+    } else {
+        memmove(hist, hist + 1, (ST_HIST - 1) * sizeof hist[0]);
+        hist[ST_HIST - 1] = v;
+    }
+}
+
+static int speedtest_json_str(const char *line, const char *key, char *out, size_t cap)
+{
+    char needle[48];
+    const char *p;
+    size_t o = 0;
+    snprintf(needle, sizeof needle, "\"%s\":", key);
+    p = strstr(line, needle);
+    if (!p || cap == 0) return 0;
+    p += strlen(needle);
+    while (*p == ' ' || *p == '\t') p++;
+    if (*p != '"') return 0;
+    p++;
+    while (*p && *p != '"' && o + 1 < cap) {
+        if (*p == '\\' && p[1]) p++;
+        out[o++] = *p++;
+    }
+    out[o] = 0;
+    return 1;
+}
+
+static int speedtest_json_num(const char *line, const char *key, double *out)
+{
+    char needle[48];
+    char *end = NULL;
+    const char *p;
+    snprintf(needle, sizeof needle, "\"%s\":", key);
+    p = strstr(line, needle);
+    if (!p) return 0;
+    p += strlen(needle);
+    while (*p == ' ' || *p == '\t') p++;
+    *out = strtod(p, &end);
+    return end && end != p;
+}
+
+static const char *speedtest_phase_label(const char *phase)
+{
+    if (!strcmp(phase, "download")) return "下行测速";
+    if (!strcmp(phase, "upload")) return "上行测速";
+    if (!strcmp(phase, "start")) return "准备测速";
+    if (!strcmp(phase, "geo")) return "定位中";
+    if (!strcmp(phase, "node")) return "选择节点";
+    if (!strcmp(phase, "probe")) return "探测中";
+    if (!strcmp(phase, "result")) return "测速完成";
+    if (!strcmp(phase, "error")) return "测速失败";
+    return "测速中";
+}
+
+static void speedtest_parse_line(const char *line)
+{
+    char phase[24];
+    if (!line || !line[0] || !strcmp(line, "DONE")) return;
+    if (!speedtest_json_str(line, "phase", phase, sizeof phase)) return;
+    snprintf(g_st_phase, sizeof g_st_phase, "%s", phase);
+    if (!strcmp(phase, "download") || !strcmp(phase, "upload")) {
+        (void)speedtest_json_num(line, "mbps", &g_st_cur_mbps);
+        (void)speedtest_json_num(line, "peak", &g_st_cur_peak);
+        if (!strcmp(phase, "download"))
+            speedtest_hist_push(g_st_dl_hist, &g_st_dl_n, g_st_cur_mbps);
+        else
+            speedtest_hist_push(g_st_ul_hist, &g_st_ul_n, g_st_cur_mbps);
+        g_st_state = ST_STATE_RUNNING;
+        return;
+    }
+    if (!strcmp(phase, "result")) {
+        g_st_have_result = 1;
+        (void)speedtest_json_str(line, "node", g_st_node, sizeof g_st_node);
+        (void)speedtest_json_str(line, "source", g_st_source, sizeof g_st_source);
+        (void)speedtest_json_str(line, "carrier", g_st_carrier, sizeof g_st_carrier);
+        (void)speedtest_json_str(line, "city", g_st_city, sizeof g_st_city);
+        (void)speedtest_json_str(line, "ul_msg", g_st_ulmsg, sizeof g_st_ulmsg);
+        (void)speedtest_json_num(line, "dl_avg", &g_st_dl_avg);
+        (void)speedtest_json_num(line, "dl_peak", &g_st_dl_peak);
+        (void)speedtest_json_num(line, "ul_avg", &g_st_ul_avg);
+        (void)speedtest_json_num(line, "ul_peak", &g_st_ul_peak);
+        (void)speedtest_json_num(line, "ping", &g_st_ping);
+        (void)speedtest_json_num(line, "jitter", &g_st_jitter);
+        g_st_state = ST_STATE_DONE;
+        return;
+    }
+    if (speedtest_json_str(line, "msg", g_st_msg, sizeof g_st_msg)) {
+        if (!strcmp(phase, "error")) {
+            snprintf(g_st_err, sizeof g_st_err, "Test failed");
+            g_st_state = ST_STATE_FAIL;
+        } else {
+            g_st_state = ST_STATE_RUNNING;
+        }
+    }
+}
+
+static int speedtest_poll(uint32_t now_ms)
+{
+    int prev_state = g_st_state, prev_installed = g_st_installed, prev_have_result = g_st_have_result;
+    double prev_cur = g_st_cur_mbps, prev_peak = g_st_cur_peak, prev_dl = g_st_dl_avg, prev_ul = g_st_ul_avg;
+    double prev_ping = g_st_ping, prev_jitter = g_st_jitter;
+    char prev_phase[24], prev_msg[160], prev_err[160], prev_node[96], prev_source[32], prev_ulmsg[96];
+    snprintf(prev_phase, sizeof prev_phase, "%s", g_st_phase);
+    snprintf(prev_msg, sizeof prev_msg, "%s", g_st_msg);
+    snprintf(prev_err, sizeof prev_err, "%s", g_st_err);
+    snprintf(prev_node, sizeof prev_node, "%s", g_st_node);
+    snprintf(prev_source, sizeof prev_source, "%s", g_st_source);
+    snprintf(prev_ulmsg, sizeof prev_ulmsg, "%s", g_st_ulmsg);
+
+    g_st_installed = speedtest_binary_ready();
+    if (g_st_installed < 0) g_st_installed = 0;
+    {
+        int running = speedtest_running();
+        char *log = read_file(SPEEDTEST_LOG);
+        if (log && log[0]) {
+            char *save = NULL;
+            speedtest_clear_data();
+            speedtest_hist_clear();
+            for (char *line = strtok_r(log, "\r\n", &save); line; line = strtok_r(NULL, "\r\n", &save))
+                speedtest_parse_line(line);
+            if (running) {
+                if (!g_st_have_result && g_st_state != ST_STATE_FAIL)
+                    g_st_state = ST_STATE_RUNNING;
+            } else if (g_st_have_result) {
+                g_st_state = ST_STATE_DONE;
+            } else if (g_st_err[0] || g_st_phase[0] || g_st_msg[0]) {
+                if (!g_st_err[0]) snprintf(g_st_err, sizeof g_st_err, "测速结束但没有结果");
+                g_st_state = ST_STATE_FAIL;
+            } else {
+                g_st_state = g_st_installed ? ST_STATE_IDLE : ST_STATE_MISSING;
+            }
+        } else if (!running) {
+            if (!g_st_installed) g_st_state = ST_STATE_MISSING;
+            else if (g_st_state == ST_STATE_RUNNING) g_st_state = ST_STATE_IDLE;
+            else if (g_st_state == ST_STATE_MISSING) g_st_state = ST_STATE_IDLE;
+        } else {
+            g_st_state = ST_STATE_RUNNING;
+            if (!g_st_msg[0] && !g_st_phase[0]) snprintf(g_st_msg, sizeof g_st_msg, "测速中");
+        }
+        free(log);
+    }
+    g_st_poll_at = now_ms;
+    return prev_state != g_st_state || prev_installed != g_st_installed || prev_have_result != g_st_have_result ||
+           strcmp(prev_phase, g_st_phase) || strcmp(prev_msg, g_st_msg) || strcmp(prev_err, g_st_err) ||
+           strcmp(prev_node, g_st_node) || strcmp(prev_source, g_st_source) || strcmp(prev_ulmsg, g_st_ulmsg) ||
+           fabs(prev_cur - g_st_cur_mbps) > 0.04 || fabs(prev_peak - g_st_cur_peak) > 0.04 ||
+           fabs(prev_dl - g_st_dl_avg) > 0.04 || fabs(prev_ul - g_st_ul_avg) > 0.04 ||
+           fabs(prev_ping - g_st_ping) > 0.04 || fabs(prev_jitter - g_st_jitter) > 0.04;
+}
+
+static void speedtest_start(void)
+{
+    char cmd[512], extra[32] = "";
+    speedtest_apply_saved_prefs();
+    g_st_installed = speedtest_binary_ready();
+    if (!g_st_installed) {
+        speedtest_clear_data();
+        speedtest_hist_clear();
+        snprintf(g_st_err, sizeof g_st_err, "未安装测速器");
+        g_st_state = ST_STATE_MISSING;
+        return;
+    }
+    if (!strcmp(g_st_dir, "dl")) snprintf(extra, sizeof extra, " --no-upload");
+    else if (!strcmp(g_st_dir, "ul")) snprintf(extra, sizeof extra, " --no-download");
+    speedtest_clear_data();
+    speedtest_hist_clear();
+    snprintf(g_st_msg, sizeof g_st_msg, "正在启动");
+    g_st_state = ST_STATE_RUNNING;
+    snprintf(cmd, sizeof cmd,
+             "rm -f " SPEEDTEST_LOG "; : > " SPEEDTEST_LOG "; " SPEEDTEST_BIN " test --json --src %s --dur %d%s > " SPEEDTEST_LOG " 2>&1 &",
+             g_st_src, g_st_dur, extra);
+    if (system(cmd) != 0) {
+        speedtest_hist_clear();
+        snprintf(g_st_err, sizeof g_st_err, "启动失败");
+        g_st_state = ST_STATE_FAIL;
+    }
+}
+
+static void speedtest_stop(void)
+{
+    system("for p in $(pidof better-speedtest 2>/dev/null); do kill -9 $p; done");
+    unlink(SPEEDTEST_LOG);
+    speedtest_clear_data();
+    speedtest_hist_clear();
+    g_st_installed = speedtest_binary_ready();
+    g_st_state = g_st_installed ? ST_STATE_IDLE : ST_STATE_MISSING;
+    snprintf(g_st_msg, sizeof g_st_msg, "已停止");
+}
+
+static int path_is_speedtest(const char *path)
+{
+    const char *base = strrchr(path, '/');
+    if (!base) base = path; else base++;
+    return !strcmp(base, "07-speedtest.html");
+}
+
+static int speedtest_page_index(void)
+{
+    for (int i = 0; i < g_npages; i++)
+        if (path_is_speedtest(g_pages[i])) return i;
+    return -1;
+}
+
+static int g_st_home_open = 0;
+
+static const char *speedtest_home_button_html(void)
+{
+    if (!speedtest_binary_ready()) return "";
+    return g_st_home_open ?
+           "<a href='act:sttoggle' class='speed-home on'>收起测速</a>" :
+           "<a href='act:sttoggle' class='speed-home'>网络测速</a>";
+}
+
+static const char *speedtest_src_html(void)
+{
+    static const struct { const char *v; const char *lab; } opts[4] = {
+        { "auto", "自动" }, { "cnspeed", "全球网测" }, { "ookla", "Ookla" }, { "cdn", "CDN" } };
+    static char buf[512];
+    int o = snprintf(buf, sizeof buf, "<div class='stseg'>");
+    for (int i = 0; i < 4; i++)
+        o += snprintf(buf + o, sizeof buf - o, "<a href='act:stsrc:%s' class='stsegc%s'>%s</a>",
+                      opts[i].v, !strcmp(g_st_src, opts[i].v) ? " on" : "", opts[i].lab);
+    snprintf(buf + o, sizeof buf - o, "</div>");
+    return buf;
+}
+
+static const char *speedtest_dir_html(void)
+{
+    static const struct { const char *v; const char *lab; } opts[3] = {
+        { "both", "上下行" }, { "dl", "下行" }, { "ul", "上行" } };
+    static char buf[384];
+    int o = snprintf(buf, sizeof buf, "<div class='stseg'>");
+    for (int i = 0; i < 3; i++)
+        o += snprintf(buf + o, sizeof buf - o, "<a href='act:stdir:%s' class='stsegc%s'>%s</a>",
+                      opts[i].v, !strcmp(g_st_dir, opts[i].v) ? " on" : "", opts[i].lab);
+    snprintf(buf + o, sizeof buf - o, "</div>");
+    return buf;
+}
+
+static const char *speedtest_dur_html(void)
+{
+    static const struct { int sec; const char *lab; } opts[3] = {
+        { 10, "10s" }, { 15, "15s" }, { 20, "20s" } };
+    static char buf[320];
+    int o = snprintf(buf, sizeof buf, "<div class='stseg'>");
+    for (int i = 0; i < 3; i++)
+        o += snprintf(buf + o, sizeof buf - o, "<a href='act:stdur:%d' class='stsegc%s'>%s</a>",
+                      opts[i].sec, g_st_dur == opts[i].sec ? " on" : "", opts[i].lab);
+    snprintf(buf + o, sizeof buf - o, "</div>");
+    return buf;
+}
+
+static const char *speedtest_install_html(void)
+{
+    static char buf[256], esc[160];
+    if (g_st_installed > 0) return "<div class='sthint ok'>已检测到测速器</div>";
+    html_esc(esc, sizeof esc, SPEEDTEST_BIN);
+    snprintf(buf, sizeof buf, "<div class='sthint bad'>未安装：<span class='mono'>%s</span></div>", esc);
+    return buf;
+}
+
+static const char *speedtest_action_html(void)
+{
+    if (g_st_installed <= 0) return "<span class='stbtn dis'>安装后可用</span>";
+    if (g_st_state == ST_STATE_RUNNING) return "<a href='act:ststop' class='stbtn stop'>停止测速</a>";
+    return "<a href='act:ststart' class='stbtn'>开始测速</a>";
+}
+
+static int speedtest_pct(double v, double scale)
+{
+    int pct;
+    if (scale < 1.0) scale = 1.0;
+    if (v < 0.0) v = 0.0;
+    pct = (int)(v * 100.0 / scale + 0.5);
+    if (v > 0.0 && pct < 4) pct = 4;
+    if (pct > 100) pct = 100;
+    return pct;
+}
+
+static void speedtest_chart_row(char *buf, size_t cap, int *o,
+                                const char *lab, double val, double scale,
+                                const char *unit, const char *cls)
+{
+    int pct = speedtest_pct(val, scale);
+    if (*o >= (int)cap) return;
+    *o += snprintf(buf + *o, cap - (size_t)*o,
+                   "<div class='stbar-row'><span class='stbar-lab'>%s</span>"
+                   "<span class='stbar-box'><span class='stbar-fill %s' style='width:%d%%'></span></span>"
+                   "<span class='stbar-val'>%.1f%s</span></div>",
+                   lab, cls ? cls : "", pct, val, unit);
+}
+
+static const char *speedtest_gauge_html(void)
+{
+    static char buf[640];
+    double cur = 0.0, peak = 0.0, scale = 100.0;
+    const char *label = "待机";
+    char sub[128];
+    int pct;
+    if (g_st_state == ST_STATE_RUNNING) {
+        cur = g_st_cur_mbps;
+        peak = g_st_cur_peak;
+        label = (!strcmp(g_st_phase, "upload")) ? "当前上行" :
+                (!strcmp(g_st_phase, "download")) ? "当前下行" : "测速中";
+        snprintf(sub, sizeof sub, "%s / 峰值 %.1f Mbps", speedtest_phase_label(g_st_phase), peak);
+    } else if (g_st_have_result) {
+        cur = g_st_dl_avg >= g_st_ul_avg ? g_st_dl_avg : g_st_ul_avg;
+        peak = g_st_dl_peak >= g_st_ul_peak ? g_st_dl_peak : g_st_ul_peak;
+        label = "本次速度";
+        snprintf(sub, sizeof sub, "下行 %.1f / 上行 %.1f Mbps", g_st_dl_avg, g_st_ul_avg);
+    } else if (g_st_state == ST_STATE_MISSING) {
+        label = "未安装";
+        snprintf(sub, sizeof sub, "安装测速器后可用");
+    } else if (g_st_state == ST_STATE_FAIL) {
+        label = "失败";
+        snprintf(sub, sizeof sub, "%s", g_st_err[0] ? g_st_err : "测速失败");
+    } else {
+        label = "准备就绪";
+        snprintf(sub, sizeof sub, "点击开始测速");
+    }
+    if (peak > scale) scale = peak;
+    if (cur > scale) scale = cur;
+    pct = speedtest_pct(cur, scale);
+    snprintf(buf, sizeof buf,
+             "<div class='st-card st-gauge'>"
+             "<div class='st-gauge-title'>网速仪表盘</div>"
+             "<div class='st-gauge-face'><span class='st-gauge-num'>%.1f</span><span class='st-gauge-unit'>Mbps</span></div>"
+             "<div class='st-scale'><span class='st-fill' style='width:%d%%'></span></div>"
+             "<div class='st-gauge-sub'>%s · %s</div>"
+             "</div>",
+             cur, pct, label, sub);
+    return buf;
+}
+
+static const char *speedtest_chart_html(void)
+{
+    static char buf[1200];
+    int o = 0;
+    double speed_scale = 100.0;
+    double max_speed = g_st_dl_peak;
+    if (g_st_ul_peak > max_speed) max_speed = g_st_ul_peak;
+    if (g_st_cur_peak > max_speed) max_speed = g_st_cur_peak;
+    if (max_speed > speed_scale) speed_scale = max_speed;
+    o += snprintf(buf + o, sizeof buf - (size_t)o, "<div class='st-card st-chart'><div class='st-chart-title'>测速图表</div>");
+    if (g_st_have_result) {
+        speedtest_chart_row(buf, sizeof buf, &o, "下行", g_st_dl_avg, speed_scale, "M", "");
+        speedtest_chart_row(buf, sizeof buf, &o, "峰值", g_st_dl_peak, speed_scale, "M", "");
+        speedtest_chart_row(buf, sizeof buf, &o, "上行", g_st_ul_avg, speed_scale, "M", "up");
+        speedtest_chart_row(buf, sizeof buf, &o, "峰值", g_st_ul_peak, speed_scale, "M", "up");
+        speedtest_chart_row(buf, sizeof buf, &o, "延迟", g_st_ping, 100.0, "ms", "ping");
+    } else if (g_st_state == ST_STATE_RUNNING) {
+        speedtest_chart_row(buf, sizeof buf, &o, "当前", g_st_cur_mbps, speed_scale, "M", !strcmp(g_st_phase, "upload") ? "up" : "");
+        speedtest_chart_row(buf, sizeof buf, &o, "峰值", g_st_cur_peak, speed_scale, "M", !strcmp(g_st_phase, "upload") ? "up" : "");
+    } else {
+        speedtest_chart_row(buf, sizeof buf, &o, "下行", 0.0, speed_scale, "M", "");
+        speedtest_chart_row(buf, sizeof buf, &o, "上行", 0.0, speed_scale, "M", "up");
+        speedtest_chart_row(buf, sizeof buf, &o, "延迟", 0.0, 100.0, "ms", "ping");
+    }
+    snprintf(buf + o, sizeof buf - (size_t)o, "</div>");
+    return buf;
+}
+
+static double speedtest_display_mbps(void)
+{
+    if (g_st_state == ST_STATE_RUNNING) return g_st_cur_mbps;
+    if (g_st_have_result) return g_st_dl_avg >= g_st_ul_avg ? g_st_dl_avg : g_st_ul_avg;
+    return 0.0;
+}
+
+static double speedtest_display_peak_mbps(void)
+{
+    double peak = g_st_cur_peak;
+    if (g_st_dl_peak > peak) peak = g_st_dl_peak;
+    if (g_st_ul_peak > peak) peak = g_st_ul_peak;
+    if (peak < speedtest_display_mbps()) peak = speedtest_display_mbps();
+    if (peak < 100.0) peak = 100.0;
+    return peak;
+}
+
+static const char *speedtest_dial_html(void)
+{
+    static char buf[720], sub[160], esc[220];
+    double cur = speedtest_display_mbps();
+    if (g_st_state == ST_STATE_RUNNING) {
+        snprintf(sub, sizeof sub, "%s / 峰值 %.1f Mbps", speedtest_phase_label(g_st_phase), g_st_cur_peak);
+    } else if (g_st_have_result) {
+        snprintf(sub, sizeof sub, "下行 %.1f / 上行 %.1f Mbps", g_st_dl_avg, g_st_ul_avg);
+    } else if (g_st_state == ST_STATE_MISSING) {
+        snprintf(sub, sizeof sub, "安装测速器后可用");
+    } else if (g_st_state == ST_STATE_FAIL) {
+        snprintf(sub, sizeof sub, "%s", g_st_err[0] ? g_st_err : "测速失败");
+    } else {
+        snprintf(sub, sizeof sub, "准备就绪 / %d秒", g_st_dur);
+    }
+    html_esc(esc, sizeof esc, sub);
+    snprintf(buf, sizeof buf,
+             "<div class='st-card st-gauge'>"
+             "<div id='st-gauge-dial' class='st-gauge-dial' style='width:184px;height:184px;margin:0 auto'></div>"
+             "<div class='st-gauge-sub'>%.1f Mbps · %s</div>"
+             "</div>",
+             cur, esc);
+    return buf;
+}
+
+static const char *speedtest_lines_html(void)
+{
+    static char buf[720];
+    double dl = g_st_have_result ? g_st_dl_avg : (g_st_dl_n > 0 ? g_st_dl_hist[g_st_dl_n - 1] / 10.0 : 0.0);
+    double ul = g_st_have_result ? g_st_ul_avg : (g_st_ul_n > 0 ? g_st_ul_hist[g_st_ul_n - 1] / 10.0 : 0.0);
+    snprintf(buf, sizeof buf,
+             "<div class='st-card st-lines'>"
+             "<div class='st-line-head'>下行折线<b>%.1f Mbps</b></div>"
+             "<div id='st-chart-dl' class='st-line-chart'></div>"
+             "<div class='st-line-head'>上行折线<b>%.1f Mbps</b></div>"
+             "<div id='st-chart-ul' class='st-line-chart'></div>"
+             "</div>",
+             dl, ul);
+    return buf;
+}
+
+static const char *speedtest_home_inline_html(void)
+{
+    static char buf[8192];
+    if (!g_st_home_open || !speedtest_binary_ready()) return "";
+    snprintf(buf, sizeof buf,
+             "<div class='st-home-panel'>"
+             "%s"
+             "%s"
+             "<div class='st-card st-options'>"
+             "<div class='st-caption'>测速源</div>%s"
+             "<div class='st-caption'>方向</div>%s"
+             "<div class='st-caption'>时长</div>%s"
+             "</div>"
+             "<div class='st-actionbar'>%s</div>"
+             "</div>",
+             speedtest_dial_html(),
+             speedtest_lines_html(),
+             speedtest_src_html(),
+             speedtest_dir_html(),
+             speedtest_dur_html(),
+             speedtest_action_html());
+    return buf;
+}
+static const char *speedtest_status_html(void)
+{
+    static char buf[320], raw[180], esc[256];
+    const char *cls = "idle";
+    if (g_st_state == ST_STATE_RUNNING) {
+        cls = "run";
+        if (!strcmp(g_st_phase, "download") || !strcmp(g_st_phase, "upload"))
+            snprintf(raw, sizeof raw, "%s %.1f Mbps / 峰值 %.1f",
+                     speedtest_phase_label(g_st_phase), g_st_cur_mbps, g_st_cur_peak);
+        else if (g_st_phase[0]) snprintf(raw, sizeof raw, "%s", speedtest_phase_label(g_st_phase));
+        else if (g_st_msg[0]) snprintf(raw, sizeof raw, "测速中");
+        else snprintf(raw, sizeof raw, "测速中");
+    } else if (g_st_state == ST_STATE_DONE) {
+        cls = "done";
+        snprintf(raw, sizeof raw, "完成 / 下行 %.1f Mbps", g_st_dl_avg);
+    } else if (g_st_state == ST_STATE_FAIL) {
+        cls = "fail";
+        snprintf(raw, sizeof raw, "%s", g_st_err[0] ? g_st_err : "测速失败");
+    } else if (g_st_state == ST_STATE_MISSING) {
+        cls = "fail";
+        snprintf(raw, sizeof raw, "未安装测速器");
+    } else {
+        snprintf(raw, sizeof raw, "准备就绪 / %d秒", g_st_dur);
+    }
+    html_esc(esc, sizeof esc, raw);
+    snprintf(buf, sizeof buf, "<div class='ststat %s'>%s</div>", cls, esc);
+    return buf;
+}
+
+static const char *speedtest_result_html(void)
+{
+    static char buf[1400], node[192], source[96], loc[128], ul[192], err[192];
+    char loc_raw[96];
+    if (g_st_have_result) {
+        html_esc(node, sizeof node, g_st_node[0] ? g_st_node : "-");
+        html_esc(source, sizeof source, g_st_source[0] ? g_st_source : "-");
+        if (g_st_carrier[0] || g_st_city[0])
+            snprintf(loc_raw, sizeof loc_raw, "%s%s%s", g_st_carrier, (g_st_carrier[0] && g_st_city[0]) ? " / " : "", g_st_city);
+        else
+            snprintf(loc_raw, sizeof loc_raw, "-");
+        html_esc(loc, sizeof loc, loc_raw);
+        snprintf(ul, sizeof ul, "%.1f / %.1f Mbps", g_st_ul_avg, g_st_ul_peak);
+        snprintf(buf, sizeof buf,
+                 "<div class='stres'>"
+                 "<div class='strow'><span>节点</span><b>%s</b></div>"
+                 "<div class='strow'><span>来源</span><b>%s</b></div>"
+                 "<div class='strow'><span>位置</span><b>%s</b></div>"
+                 "<div class='strow'><span>下行</span><b>%.1f / %.1f Mbps</b></div>"
+                 "<div class='strow'><span>上行</span><b>%s</b></div>"
+                 "<div class='strow'><span>延迟</span><b>%.1f ms / 抖动 %.1f ms</b></div>"
+                 "</div>",
+                 node, source, loc, g_st_dl_avg, g_st_dl_peak, ul, g_st_ping, g_st_jitter);
+        return buf;
+    }
+    if (g_st_state == ST_STATE_FAIL) {
+        html_esc(err, sizeof err, g_st_err[0] ? g_st_err : "测速失败");
+        snprintf(buf, sizeof buf, "<div class='stempty bad'>%s</div>", err);
+        return buf;
+    }
+    if (g_st_state == ST_STATE_RUNNING) return "<div class='stempty'>测速进行中，结果稍后显示。</div>";
+    if (g_st_state == ST_STATE_MISSING) return "<div class='stempty'>安装测速器后显示结果。</div>";
+    return "<div class='stempty'>暂无测速结果。</div>";
 }
 
 static int hsr_freq_is_whitelist(long arfcn)
@@ -3062,6 +3674,17 @@ static int build_kv(struct kv *t, const char *path)
     t[i++] = (struct kv){ "IMEIBTN", g_show_imei ? "隐藏" : "显示" };
     t[i++] = (struct kv){ "BRIGHT", s_bright };   t[i++] = (struct kv){ "AUTOOFF", s_autooff };
     t[i++] = (struct kv){ "REFRESHSEG", s_refreshseg };
+    t[i++] = (struct kv){ "STSRCSEG", speedtest_src_html() };
+    t[i++] = (struct kv){ "STDIRSEG", speedtest_dir_html() };
+    t[i++] = (struct kv){ "STDURSEG", speedtest_dur_html() };
+    t[i++] = (struct kv){ "STSTATUS", speedtest_status_html() };
+    t[i++] = (struct kv){ "STRESULT", speedtest_result_html() };
+    t[i++] = (struct kv){ "STACTION", speedtest_action_html() };
+    t[i++] = (struct kv){ "STINSTALL", speedtest_install_html() };
+    t[i++] = (struct kv){ "STGAUGE", speedtest_dial_html() };
+    t[i++] = (struct kv){ "STCHART", speedtest_lines_html() };
+    t[i++] = (struct kv){ "STHOMEBTN", speedtest_home_button_html() };
+    t[i++] = (struct kv){ "STHOMEINLINE", speedtest_home_inline_html() };
     t[i++] = (struct kv){ "SIGADVSTATE", s_sigadvstate };
     t[i++] = (struct kv){ "MEMDETAIL", s_memdet }; t[i++] = (struct kv){ "UPSHORT", s_upshort };
     t[i++] = (struct kv){ "CHGV", s_chgv };       t[i++] = (struct kv){ "CHGI", s_chgi };
@@ -3124,7 +3747,7 @@ static int build_kv(struct kv *t, const char *path)
 
 static void refresh_status_cache(void)
 {
-    struct kv t[160];
+    struct kv t[192];
     (void)build_kv(t, NULL);
 }
 
@@ -3133,7 +3756,7 @@ static const char *page_html(const char *path)
 {
     const char *tmpl = read_template_cached(path);   /* cache templates with mtime invalidation */
     if (!tmpl) return NULL;
-    struct kv t[160];
+    struct kv t[192];
     int n = build_kv(t, path);
     char *html = apply_template(tmpl, t, n);
     return html;
@@ -3222,6 +3845,84 @@ static void draw_power_menu(void)
     pm_glyph("#pmc-cancel", 2, 0x4a, 0x51, 0x5c);   /* gray */
 }
 
+static int st_hist_max(const int *hist, int n)
+{
+    int mx = 10;
+    for (int i = 0; i < n; i++) if (hist[i] > mx) mx = hist[i];
+    return mx;
+}
+
+static void st_chart_grid(int x, int y, int w, int h)
+{
+    html_view_fill_rect(x + 1, y + h / 3, w - 2, 1, 0x2d, 0x3c, 0x4a, 150);
+    html_view_fill_rect(x + 1, y + h * 2 / 3, w - 2, 1, 0x2d, 0x3c, 0x4a, 150);
+}
+
+static void st_draw_one_chart(const char *sel, const int *hist, int n, int r, int g, int b)
+{
+    int x, y, w, h;
+    if (!html_view_rect(sel, &x, &y, &w, &h)) return;
+    st_chart_grid(x, y, w, h);
+    if (n >= 2) {
+        html_view_polyline(x + 3, y + 3, w - 6, h - 6, hist, n, 0, st_hist_max(hist, n), r, g, b, 2, 24);
+    } else if (n == 1) {
+        int cy = y + h - 6 - (hist[0] * (h - 12)) / st_hist_max(hist, n);
+        html_view_fill_round_rect(x + w - 10, cy - 3, 6, 6, 3, r, g, b, 255);
+    }
+}
+
+static void draw_speedtest_widgets(void)
+{
+    int x, y, w, h;
+    html_view_set_clip_top(26);
+    if (html_view_rect("#st-gauge-dial", &x, &y, &w, &h)) {
+        double cur = speedtest_display_mbps();
+        double scale = speedtest_display_peak_mbps();
+        int pct = speedtest_pct(cur, scale);
+        int rad = (w < h ? w : h) / 2 - 3;
+        int cx = x + w / 2, cy = y + h / 2;
+        double ang = (210.0 - 240.0 * pct / 100.0) * PM_PI / 180.0;
+        double vx = cos(ang), vy = -sin(ang);
+        double len = rad * 0.58, back = rad * 0.14, half = rad * 0.055;
+        double tipx = cx + vx * len, tipy = cy + vy * len;
+        double basex = cx - vx * back, basey = cy - vy * back;
+        double px = -vy, py = vx;
+        int nx[3] = {
+            (int)(tipx + 0.5),
+            (int)(basex + px * half + 0.5),
+            (int)(basex - px * half + 0.5)
+        };
+        int ny[3] = {
+            (int)(tipy + 0.5),
+            (int)(basey + py * half + 0.5),
+            (int)(basey - py * half + 0.5)
+        };
+        char num[32];
+
+        pm_disc(cx, cy, rad, 0x0b, 0x12, 0x1b, 255);
+        pm_disc(cx, cy, rad - 5, 0x12, 0x20, 0x2e, 255);
+        pm_arc(cx, cy, rad - 12, rad - 20, -30, 210, 0x34, 0x43, 0x51);
+        if (pct > 0)
+            pm_arc(cx, cy, rad - 12, rad - 20, (int)(210.0 - 240.0 * pct / 100.0), 210, 0x2f, 0xb8, 0xc9);
+        for (int i = 0; i <= 10; i++) {
+            double a = (210.0 - 240.0 * i / 10.0) * PM_PI / 180.0;
+            double tx = cos(a), ty = -sin(a);
+            pm_line(cx + tx * (rad - 30), cy + ty * (rad - 30),
+                    cx + tx * (rad - 22), cy + ty * (rad - 22),
+                    i % 5 == 0 ? 3.0 : 2.0, 0xd8, 0xe5, 0xee);
+        }
+        html_view_fill_poly(nx, ny, 3, 0xf0, 0xb2, 0x47, 255);
+        pm_disc(cx, cy, 8, 0xf4, 0xf7, 0xfb, 255);
+        pm_disc(cx, cy, 4, 0x12, 0x20, 0x2e, 255);
+        snprintf(num, sizeof num, "%.1f", cur);
+        draw_center_text_px(cx, cy + 38, num, 28, 1, 0xff, 0xff, 0xff, 255);
+        draw_center_text_px(cx, cy + 62, "Mbps", 12, 0, 0x9f, 0xb4, 0xc5, 255);
+    }
+    st_draw_one_chart("#st-chart-dl", g_st_dl_hist, g_st_dl_n, 0x2f, 0xb8, 0xc9);
+    st_draw_one_chart("#st-chart-ul", g_st_ul_hist, g_st_ul_n, 0xe7, 0xa3, 0x3b);
+    html_view_set_clip_top(0);
+}
+
 static void capture_fb(drm_disp_t *d);   /* fwd: fb snapshot for modal overlay */
 
 static void maybe_dump_fb(drm_disp_t *d)
@@ -3246,8 +3947,10 @@ static void render(drm_disp_t *disp, const char *path)
     int special_page = strstr(path, "menu.html") || strstr(path, "lockscreen.html");
     int scroll = special_page ? 0 : g_scroll;
     size_t html_len = strlen(html);
-    int has_charts = strstr(path, "charts.html") != NULL;
+    int is_speedtest = path_is_speedtest(path);
+    int has_charts = strstr(path, "charts.html") != NULL || is_speedtest;
     long long css_mtime = file_mtime_ns(UI_DIR "/style.css");
+    if (is_speedtest) css_mtime ^= file_mtime_ns(UI_DIR "/speedtest.css");
     int cacheable = html_len > 0 && html_len < sizeof(g_render_html_cache);
     int reuse = cacheable && !has_charts &&
                  g_render_html_cache_scroll == scroll &&
@@ -3275,6 +3978,7 @@ static void render(drm_disp_t *disp, const char *path)
         }
     }
     draw_charts();      /* native polylines into any #chart-* placeholders */
+    if (is_speedtest || g_st_home_open) draw_speedtest_widgets();
     draw_native_statusbar();
     draw_sms_icon();    /* native envelope in the status bar when unread SMS */
     if (strstr(path, "menu.html")) draw_power_menu();   /* round power buttons */
@@ -3365,15 +4069,27 @@ static void compose_frame(drm_disp_t *d, int o)
 
 /* Render the page pair for a drag direction into A(left)/B(right). dir>0 = next.
  * The current page keeps its scroll; the target page comes in at the top. */
+static void render_page_to_pair_buf(uint16_t *buf, const char *path, const char *html, int scroll)
+{
+    if (!html) return;
+    html_view_render_to_scroll(buf, html, scroll);
+    html_view_target_begin(buf, scroll);
+    draw_charts();
+    if (path_is_speedtest(path) || g_st_home_open) draw_speedtest_widgets();
+    draw_native_statusbar();
+    draw_sms_icon();
+    html_view_target_end();
+}
+
 static void prep_pair(int target, int dir)
 {
     const char *h;
     if (dir > 0) {   /* next: left=current, right=target */
-        html_view_set_scroll(g_scroll); h = page_html(g_pages[g_cur]);  if (h) html_view_render_to(g_bufA, h);
-        html_view_set_scroll(0);        h = page_html(g_pages[target]); if (h) html_view_render_to(g_bufB, h);
+        html_view_set_scroll(g_scroll); h = page_html(g_pages[g_cur]);  render_page_to_pair_buf(g_bufA, g_pages[g_cur], h, g_scroll);
+        html_view_set_scroll(0);        h = page_html(g_pages[target]); render_page_to_pair_buf(g_bufB, g_pages[target], h, 0);
     } else {         /* prev: left=target, right=current */
-        html_view_set_scroll(0);        h = page_html(g_pages[target]); if (h) html_view_render_to(g_bufA, h);
-        html_view_set_scroll(g_scroll); h = page_html(g_pages[g_cur]);  if (h) html_view_render_to(g_bufB, h);
+        html_view_set_scroll(0);        h = page_html(g_pages[target]); render_page_to_pair_buf(g_bufA, g_pages[target], h, 0);
+        html_view_set_scroll(g_scroll); h = page_html(g_pages[g_cur]);  render_page_to_pair_buf(g_bufB, g_pages[g_cur], h, g_scroll);
     }
     html_view_set_scroll(g_scroll);
 }
@@ -3402,6 +4118,9 @@ static void scroll_blit(drm_disp_t *d, int scroll)
         if (src) copy_rev_span(dp, src, W);
         else     fill_rev_span(dp, 0, W);
     }
+    html_view_set_scroll(scroll);
+    draw_charts();
+    if (path_is_speedtest(g_pages[g_cur]) || g_st_home_open) draw_speedtest_widgets();
     /* The native status bar is pinned; dragging only changes the content below it.
      * With the framebuffer rotated 180 degrees, that content maps to the top
      * framebuffer rows, so the dirty rectangle intentionally excludes the tail. */
@@ -3531,7 +4250,11 @@ int main(void)
     #define CUR_PATH (g_lock_state == 1 ? g_pages[0] : g_lock_state ? lock_path : menu ? menu_path : g_pages[g_cur])
 
     load_conf();                          /* restore persisted UI settings */
+    speedtest_apply_saved_prefs();
+    speedtest_poll(millis());
     if (!g_charge_boot) rescan_pages_keep_current();
+    g_pages_dir_mtime = file_mtime_ns(UI_DIR);
+    g_pages_scan_at = millis();
     (void)datad_set_refresh_ms(g_refresh_ms);
     (void)datad_set_signal_read(g_sig_read);
     (void)datad_set_signal_parse(g_sig_parse);
@@ -4136,6 +4859,63 @@ int main(void)
                             save_conf();
                             need_render = 1;
                         }
+                        else if (!strcmp(a, "stpage")) {
+                            int pi = speedtest_page_index();
+                            if (pi >= 0) {
+                                g_cur = pi;
+                                g_scroll = 0;
+                                menu = 0;
+                            }
+                            last_act = now;
+                            need_render = 1;
+                        }
+                        else if (!strcmp(a, "sttoggle")) {
+                            if (speedtest_binary_ready())
+                                g_st_home_open = !g_st_home_open;
+                            else
+                                g_st_home_open = 0;
+                            g_cur = 0;
+                            g_scroll = 0;
+                            menu = 0;
+                            last_act = now;
+                            need_render = 1;
+                        }
+                        else if (!strcmp(a, "stclose")) {
+                            
+                            g_st_home_open = 0;g_cur = 0;
+                            g_scroll = 0;
+                            menu = 0;
+                            last_act = now;
+                            need_render = 1;
+                        }
+                        else if (!strcmp(a, "ststart")) {
+                            speedtest_start();
+                            last_act = now;
+                            need_render = 1;
+                        }
+                        else if (!strcmp(a, "ststop")) {
+                            speedtest_stop();
+                            last_act = now;
+                            need_render = 1;
+                        }
+                        else if (!strncmp(a, "stsrc:", 6)) {
+                            snprintf(g_st_src, sizeof g_st_src, "%s", speedtest_norm_src(a + 6));
+                            save_conf();
+                            last_act = now;
+                            need_render = 1;
+                        }
+                        else if (!strncmp(a, "stdir:", 6)) {
+                            snprintf(g_st_dir, sizeof g_st_dir, "%s", speedtest_norm_dir(a + 6));
+                            save_conf();
+                            last_act = now;
+                            need_render = 1;
+                        }
+                        else if (!strncmp(a, "stdur:", 6)) {
+                            g_st_dur = speedtest_norm_dur(atoi(a + 6));
+                            save_conf();
+                            last_act = now;
+                            need_render = 1;
+                        }
                         else if (!strcmp(a, "locktoggle")) {   /* on->off clears PIN; off->on opens setup pad */
                             if (lock_enabled()) clear_pin();
                             else                enter_lock(1);
@@ -4249,6 +5029,18 @@ action_done:
 
         /* reconcile page-2 WiFi switch states from uci/iw on a slow throttle */
         if (!dragging && !scroll_inertia && now - g_wifi_aux_at >= 4000) { g_wifi_aux_at = now; wifi_aux_refresh(); }
+
+        if (!g_charge_boot && now - g_pages_scan_at >= 1000) {
+            g_pages_scan_at = now;
+            if (rescan_pages_if_changed()) need_render = 1;
+        }
+
+        int st_poll_ms = (g_st_state == ST_STATE_RUNNING || g_st_home_open) ? 300 : 900;
+        if (!dragging && !scroll_inertia && now - g_st_poll_at >= (uint32_t)st_poll_ms) {
+            int st_changed = speedtest_poll(now);
+            if ((path_is_speedtest(CUR_PATH) || g_st_home_open) && (st_changed || g_st_state == ST_STATE_RUNNING))
+                need_render = 1;
+        }
 
         if (need_render && backlight_is_on()) {
             if (ext_ok && devui_ext_active(&ext) && !g_lock_state)

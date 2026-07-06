@@ -263,3 +263,7 @@ adb push 04-about.html /data/plugins/u60pro-devui/ui/
 ---
 
 更深入的实现细节（渲染管线、令牌如何在 C 里生成、硬件接口）见 [DEVELOPMENT.md](DEVELOPMENT.md) 和 [HARDWARE.md](HARDWARE.md)。
+
+## Optional speedtest panel
+
+The first page may show a `网络测速` toggle when `/data/plugins/better-speedtest/better-speedtest` is installed and executable. The panel expands inline below the signal cards and uses DevUI-native drawing for the gauge and line charts. See [`SPEEDTEST.md`](SPEEDTEST.md) for paths, actions, rendering notes, and install/uninstall conventions.

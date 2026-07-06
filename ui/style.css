@@ -288,6 +288,13 @@ body.light .row + .row { border-top: 1px solid #e6e9ef; }
 /* bottom spacer on long pages so the absolute dots don't cover the last card */
 .pgpad { height: 40px; }
 
+/* optional speedtest entry on the first page */
+.speed-home { display: block; margin: 8px 8px 0; padding: 13px 10px; border-radius: 10px; text-align: center; text-decoration: none; font-size: 17px; font-weight: 800; }
+body.dark  .speed-home { background: #153846; color: #dff7fb; border: 1px solid #24576a; }
+body.light .speed-home { background: #dff8fb; color: #12313d; border: 1px solid #abdce6; }
+body.dark  .speed-home.on { background: #2b3844; border-color: #43586b; color: #eef8fb; }
+body.light .speed-home.on { background: #e6edf3; border-color: #c2cbd6; color: #1d2d38; }
+
 /* ---- bottom page dots (centered, no box) ---- */
 .dots { position: absolute; left: 0; right: 0; bottom: 8px; text-align: center; }
 .dots .dot { display: inline-block; width: 6px; height: 6px; margin: 0 4px; border-radius: 3px;
@@ -341,3 +348,34 @@ a.kp.kpx { font-size: 16px; font-weight: 400; }   /* 取消 key */
 .pmc { display: block; width: 84px; height: 84px; margin: 0 auto; }
 .pmlab { display: block; text-align: center; font-size: 15px; margin-top: 8px; }
 .pmbtn.armed .pmlab { font-weight: 700; }
+
+.st-home-panel { margin: 0; padding: 0 0 10px; }
+.st-card { margin: 8px 8px 0; padding: 10px; border-radius: 10px; overflow: hidden; }
+body.dark  .st-card { background: #101922; border: 1px solid #1d3b4a; }
+body.light .st-card { background: #ffffff; border: 1px solid #c8d9e0; }
+.st-gauge { text-align: center; padding-top: 12px; }
+.st-gauge-dial { border-radius: 92px; overflow: hidden; }
+body.dark  .st-gauge-dial { background: #0b1720; }
+body.light .st-gauge-dial { background: #edf8fb; }
+.st-gauge-sub { margin-top: 8px; font-size: 14px; color: #93a9b5; }
+.st-lines { padding: 9px 10px 10px; }
+.st-line-head { height: 23px; line-height: 23px; font-size: 14px; color: #93a9b5; overflow: hidden; }
+.st-line-head b { float: right; font-size: 14px; color: #e8f7fb; }
+body.light .st-line-head b { color: #183342; }
+.st-line-chart { height: 44px; margin: 0 0 8px; border-radius: 8px; overflow: hidden; }
+body.dark  .st-line-chart { background: #172431; border: 1px solid #1f3948; }
+body.light .st-line-chart { background: #eef7fa; border: 1px solid #cbdfe6; }
+.st-caption { margin: 8px 0 2px; font-size: 14px; font-weight: 700; color: #93a9b5; }
+.stseg { text-align: center; }
+.stsegc { display: inline-block; box-sizing: border-box; width: 68px; margin: 5px 2px 0; padding: 8px 0; border-radius: 10px; text-align: center; text-decoration: none; font-size: 13px; font-weight: 700; }
+body.dark  .stsegc { background: #213241; color: #d5edf4; border: 1px solid #31495a; }
+body.light .stsegc { background: #edf5f8; color: #183342; border: 1px solid #cadde4; }
+body.dark  .stsegc.on { background: #2bb8c8; color: #05151a; border-color: #4dddeb; }
+body.light .stsegc.on { background: #22a8bc; color: #ffffff; border-color: #178ca0; }
+.st-actionbar { margin: 10px 8px 0; }
+.stbtn { display: block; padding: 14px 0; border-radius: 12px; text-align: center; text-decoration: none; font-size: 20px; font-weight: 900; }
+body.dark  .stbtn { background: #2bb8c8; color: #041419; border: 1px solid #4dddeb; }
+body.light .stbtn { background: #16a2b7; color: #ffffff; border: 1px solid #0e8698; }
+body.dark  .stbtn.stop { background: #e7a33b; color: #160c02; border-color: #ffc766; }
+body.light .stbtn.stop { background: #d88418; color: #ffffff; border-color: #bd6f0f; }
+.stbtn.dis { background: #36414a; color: #8d9ca6; border-color: #48545d; }

@@ -25,9 +25,11 @@ using namespace litehtml;
 /* ---- target framebuffer (shared with drm_disp, 180° rotated panel) ---- */
 static uint16_t *g_fb;
 static int g_w, g_h, g_pitch_px, g_rotate = 1;
+static int g_clip_top = 0;
 
 static inline void put_px(int x, int y, int r, int g, int b, int a)
 {
+    if (y < g_clip_top) return;
     if (x < 0 || y < 0 || x >= g_w || y >= g_h || a <= 0) return;
     int dx = g_rotate ? (g_w - 1 - x) : x;
     int dy = g_rotate ? (g_h - 1 - y) : y;
@@ -433,6 +435,34 @@ extern "C" int html_view_render_to(uint16_t *buf, const char *html)
     return hh;
 }
 
+extern "C" int html_view_render_to_scroll(uint16_t *buf, const char *html, int scroll)
+{
+    uint16_t *sfb = g_fb; int sw = g_w, sh = g_h, sp = g_pitch_px, sr = g_rotate, ssc = g_scroll_y;
+    g_fb = buf; g_w = sw; g_h = sh; g_pitch_px = sw; g_rotate = 0; g_scroll_y = scroll < 0 ? 0 : scroll;
+    int hh = html_view_render_html(html);
+    g_fb = sfb; g_w = sw; g_h = sh; g_pitch_px = sp; g_rotate = sr; g_scroll_y = ssc;
+    return hh;
+}
+
+static uint16_t *g_saved_fb = nullptr;
+static int g_saved_w = 0, g_saved_h = 0, g_saved_pitch = 0, g_saved_rotate = 0, g_saved_scroll = 0;
+
+extern "C" void html_view_target_begin(uint16_t *buf, int scroll)
+{
+    if (g_saved_fb) return;
+    g_saved_fb = g_fb; g_saved_w = g_w; g_saved_h = g_h;
+    g_saved_pitch = g_pitch_px; g_saved_rotate = g_rotate; g_saved_scroll = g_scroll_y;
+    g_fb = buf; g_pitch_px = g_w; g_rotate = 0; g_scroll_y = scroll < 0 ? 0 : scroll;
+}
+
+extern "C" void html_view_target_end(void)
+{
+    if (!g_saved_fb) return;
+    g_fb = g_saved_fb; g_w = g_saved_w; g_h = g_saved_h;
+    g_pitch_px = g_saved_pitch; g_rotate = g_saved_rotate; g_scroll_y = g_saved_scroll;
+    g_saved_fb = nullptr;
+}
+
 extern "C" int html_view_render_to_size(uint16_t *buf, int w, int h, const char *html)
 {
     uint16_t *sfb = g_fb; int sw = g_w, sh = g_h, sp = g_pitch_px, sr = g_rotate, ssc = g_scroll_y;
@@ -444,6 +474,7 @@ extern "C" int html_view_render_to_size(uint16_t *buf, int w, int h, const char 
 
 extern "C" void html_view_set_uidir(const char *d) { g_ui_dir = d; }
 extern "C" void html_view_set_scroll(int y) { g_scroll_y = y < 0 ? 0 : y; }
+extern "C" void html_view_set_clip_top(int y) { g_clip_top = y < 0 ? 0 : y; }
 
 /* Render the full page (no rotation, no clip to 480) into a tall W*bufh logical
  * buffer, for smooth windowed scrolling. Returns content height. */
@@ -668,6 +699,9 @@ extern "C" void html_view_polyline(int x, int y, int w, int h,
     if (vmax <= vmin) vmax = vmin + 1;
 
     if (fill_a > 0) {
+        int sr = r * 25 / 100;
+        int sg = g * 25 / 100;
+        int sb = b * 25 / 100;
         for (int col = 0; col < w; col++) {
             double t = (n > 1) ? (double)col / (w - 1) * (n - 1) : 0.0;
             int i0 = (int)t; double fr = t - i0;
@@ -675,7 +709,8 @@ extern "C" void html_view_polyline(int x, int y, int w, int h,
             double v = v0 + (v1 - v0) * fr;
             if (v < vmin) v = vmin; if (v > vmax) v = vmax;
             int py = y + (h - 1) - (int)((v - vmin) * (h - 1) / (vmax - vmin));
-            for (int yy = py; yy < y + h; yy++) put_px(x + col, yy, r, g, b, fill_a);
+            for (int yy = py; yy < y + h; yy++)
+                if (((col + yy) & 1) == 0) put_px(x + col, yy, sr, sg, sb, 255);
         }
     }
 
