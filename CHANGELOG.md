@@ -2,6 +2,17 @@
 
 > 当前正式命名与安装路径已经统一为：`zwrt-datad`、`/data/plugins/zwrt-datad/zwrt-datad`、`/data/plugins/u60pro-devui/`、`/data/plugins/u60pro-devui/ui`。历史条目里如果出现 `u60-datad`、`/data/u60pro` 或 `/data/ui`，表示当时版本记录。
 
+## v1.2.8 - 2026-07-08
+
+### 修复
+
+- **浅色模式测速仪表盘背景**：native gauge 绘制层现在跟随 `g_theme` 切换配色，浅色模式使用浅蓝白圆盘、深色刻度和深色测速数字，不再被深色圆盘覆盖。
+- **测速折线图网格浅色适配**：折线图 native 网格线跟随浅色主题变浅，和浅色测速卡片背景保持一致。
+
+### 验证
+
+- 已在 ubuntu 编译机完成正式构建，发布资产 `u60pro-devui-aarch64` SHA256 `02172f7d5fbb5e45369805827247e2d4ccbc406c69dd812e9c72c33ba300fb69`。
+
 ## v1.2.7 - 2026-07-08
 
 ### 变更

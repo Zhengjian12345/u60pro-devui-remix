@@ -4343,8 +4343,14 @@ static int st_hist_max(const int *hist, int n)
 
 static void st_chart_grid(int x, int y, int w, int h)
 {
-    html_view_fill_rect(x + 1, y + h / 3, w - 2, 1, 0x2d, 0x3c, 0x4a, 150);
-    html_view_fill_rect(x + 1, y + h * 2 / 3, w - 2, 1, 0x2d, 0x3c, 0x4a, 150);
+    const int dark = !g_theme;
+    const int r = dark ? 0x2d : 0xb8;
+    const int g = dark ? 0x3c : 0xcc;
+    const int b = dark ? 0x4a : 0xd8;
+    const int a = dark ? 150 : 180;
+
+    html_view_fill_rect(x + 1, y + h / 3, w - 2, 1, r, g, b, a);
+    html_view_fill_rect(x + 1, y + h * 2 / 3, w - 2, 1, r, g, b, a);
 }
 
 static void st_draw_one_chart(const char *sel, const int *hist, int n, int r, int g, int b)
@@ -4365,6 +4371,7 @@ static void draw_speedtest_widgets(void)
     int x, y, w, h;
     html_view_set_clip_top(26);
     if (html_view_rect("#st-gauge-dial", &x, &y, &w, &h)) {
+        const int dark = !g_theme;
         double cur = speedtest_display_mbps();
         double scale = speedtest_display_peak_mbps();
         int pct = speedtest_pct(cur, scale);
@@ -4387,10 +4394,34 @@ static void draw_speedtest_widgets(void)
             (int)(basey - py * half + 0.5)
         };
         char num[32];
+        const int outer_r = dark ? 0x0b : 0xd9;
+        const int outer_g = dark ? 0x12 : 0xf0;
+        const int outer_b = dark ? 0x1b : 0xf6;
+        const int inner_r = dark ? 0x12 : 0xf7;
+        const int inner_g = dark ? 0x20 : 0xfc;
+        const int inner_b = dark ? 0x2e : 0xfe;
+        const int track_r = dark ? 0x34 : 0xc0;
+        const int track_g = dark ? 0x43 : 0xd8;
+        const int track_b = dark ? 0x51 : 0xe2;
+        const int tick_r = dark ? 0xd8 : 0x3d;
+        const int tick_g = dark ? 0xe5 : 0x58;
+        const int tick_b = dark ? 0xee : 0x65;
+        const int num_r = dark ? 0xff : 0x18;
+        const int num_g = dark ? 0xff : 0x33;
+        const int num_b = dark ? 0xff : 0x42;
+        const int unit_r = dark ? 0x9f : 0x68;
+        const int unit_g = dark ? 0xb4 : 0x7f;
+        const int unit_b = dark ? 0xc5 : 0x8b;
+        const int hub_outer_r = dark ? 0xf4 : 0x18;
+        const int hub_outer_g = dark ? 0xf7 : 0x33;
+        const int hub_outer_b = dark ? 0xfb : 0x42;
+        const int hub_inner_r = dark ? 0x12 : 0xf7;
+        const int hub_inner_g = dark ? 0x20 : 0xfc;
+        const int hub_inner_b = dark ? 0x2e : 0xfe;
 
-        pm_disc(cx, cy, rad, 0x0b, 0x12, 0x1b, 255);
-        pm_disc(cx, cy, rad - 5, 0x12, 0x20, 0x2e, 255);
-        pm_arc(cx, cy, rad - 12, rad - 20, -30, 210, 0x34, 0x43, 0x51);
+        pm_disc(cx, cy, rad, outer_r, outer_g, outer_b, 255);
+        pm_disc(cx, cy, rad - 5, inner_r, inner_g, inner_b, 255);
+        pm_arc(cx, cy, rad - 12, rad - 20, -30, 210, track_r, track_g, track_b);
         if (pct > 0)
             pm_arc(cx, cy, rad - 12, rad - 20, (int)(210.0 - 240.0 * pct / 100.0), 210, 0x2f, 0xb8, 0xc9);
         for (int i = 0; i <= 10; i++) {
@@ -4398,14 +4429,14 @@ static void draw_speedtest_widgets(void)
             double tx = cos(a), ty = -sin(a);
             pm_line(cx + tx * (rad - 30), cy + ty * (rad - 30),
                     cx + tx * (rad - 22), cy + ty * (rad - 22),
-                    i % 5 == 0 ? 3.0 : 2.0, 0xd8, 0xe5, 0xee);
+                    i % 5 == 0 ? 3.0 : 2.0, tick_r, tick_g, tick_b);
         }
         html_view_fill_poly(nx, ny, 3, 0xf0, 0xb2, 0x47, 255);
-        pm_disc(cx, cy, 8, 0xf4, 0xf7, 0xfb, 255);
-        pm_disc(cx, cy, 4, 0x12, 0x20, 0x2e, 255);
+        pm_disc(cx, cy, 8, hub_outer_r, hub_outer_g, hub_outer_b, 255);
+        pm_disc(cx, cy, 4, hub_inner_r, hub_inner_g, hub_inner_b, 255);
         snprintf(num, sizeof num, "%.1f", cur);
-        draw_center_text_px(cx, cy + 38, num, 28, 1, 0xff, 0xff, 0xff, 255);
-        draw_center_text_px(cx, cy + 62, "Mbps", 12, 0, 0x9f, 0xb4, 0xc5, 255);
+        draw_center_text_px(cx, cy + 38, num, 28, 1, num_r, num_g, num_b, 255);
+        draw_center_text_px(cx, cy + 62, "Mbps", 12, 0, unit_r, unit_g, unit_b, 255);
     }
     st_draw_one_chart("#st-chart-dl", g_st_dl_hist, g_st_dl_n, 0x2f, 0xb8, 0xc9);
     st_draw_one_chart("#st-chart-ul", g_st_ul_hist, g_st_ul_n, 0xe7, 0xa3, 0x3b);

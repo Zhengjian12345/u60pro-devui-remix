@@ -1,9 +1,9 @@
 {
   "schema": 1,
   "devui": {
-    "version": "1.2.7",
+    "version": "1.2.8",
     "asset": "u60pro-devui-aarch64",
-    "notes": "锁屏预览隐藏测速 UI，修复高铁卡片圆角背景突出，并同步信号卡片文档。"
+    "notes": "修复浅色模式下测速仪表盘 native 绘制仍使用深色圆盘的问题。"
   },
   "ui": {
     "version": "0.4.7",
