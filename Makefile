@@ -25,7 +25,7 @@ CFLAGS := -std=c11 -Os -ffunction-sections -fdata-sections \
           -D_GNU_SOURCE -DLV_CONF_INCLUDE_SIMPLE \
           -I$(ROOT) -Iinclude -I$(LVGL_DIR) -Ithird_party/stb
 
-LDFLAGS := -static -Wl,--gc-sections -lm
+LDFLAGS := -static -Wl,--gc-sections -pthread -lm
 
 .PHONY: all clean check-lvgl
 

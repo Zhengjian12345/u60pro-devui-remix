@@ -150,11 +150,11 @@ ubus 服务 ──▶ zwrt-datad ──▶ HTTP /state + SSE /events ──▶ u
 
 4 位数字 PIN 的屏幕锁，状态全在 `htmlmain.c`：
 
-- **状态**：`g_pin`（已设密码，`""`=未启用）、`g_lock_state`（0 正常 / 1 解锁键盘 / 2 设置键盘）、`g_pin_entry`（当前已输入）、`g_lock_err`（显示「密码错误」）。`CUR_PATH` 在 `g_lock_state` 非 0 时优先指向 `lockscreen.html`，覆盖电源菜单与普通页。
+- **状态**：`g_pin`（已设密码，`""`=未启用）、`g_lock_state`（0 正常 / 1 锁屏首页预览 / 2 设置 PIN 键盘 / 3 解锁 PIN 键盘）、`g_pin_entry`（当前已输入）、`g_lock_err`（显示「密码错误」）。`CUR_PATH` 在 `g_lock_state == 1` 时复用 `g_pages[0]` 作为只读预览，在 `g_lock_state == 2/3` 时指向 `lockscreen.html`，并覆盖电源菜单与普通页。
 - **持久化**：PIN 存 `/data/plugins/u60pro-devui/ui/.lockpin`（点文件，`UI_DIR` 必存在、不被 `adb push *.html` 覆盖）。`load_pin/save_pin/clear_pin`。**开机若已设密码直接进入解锁键盘**。忘记密码 `adb shell rm /data/plugins/u60pro-devui/ui/.lockpin`。
-- **触发锁屏**：`screen_off` 的两个入口——电源键短按、自动息屏超时——之后若 `lock_enabled()` 即 `enter_lock(0)`。开机同理。
+- **触发锁屏**：`screen_off` 的两个入口——电源键短按、自动息屏超时——之后若 `lock_enabled()` 即 `enter_lock(0)` 进入首页预览。开机同理。预览态显示实时第一页和原生锁图标，滑动任意方向才进入解锁 PIN 键盘。
 - **键盘交互**（主循环 `g_lock_state` 分支，仅处理 tap）：`act:pin:<0-9>` 累加，满 4 位**自动提交**（无确认键）；设置键盘存盘并开启，解锁键盘比对——正确 `g_lock_state=0` 回到界面，错误置 `g_lock_err` 并清空。`act:pin:del` 退格，`act:lockcancel` 放弃设置。
-- 第五页 `act:locktoggle`：开→关 `clear_pin()`；关→开 `enter_lock(1)` 进设置键盘（输满 4 位才真正开启）。锁定时电源键长按不再开电源菜单。
+- 第五页 `act:locktoggle`：开→关 `clear_pin()`；关→开 `enter_lock(1)` 进设置键盘（输满 4 位才真正开启）。锁定时电源键长按不再开电源菜单。首页预览态会隐藏 `网络测速` 入口、内嵌面板和测速原生控件，但后台测速检测继续轮询，解锁后仍能立刻显示正确状态。
 - **键盘布局**：litehtml 无 grid，用 `.kprow` 居中 + `.kpcell` 行内块（inline-block）等宽，按键也是 inline-block（圆角能被裁切，见下「圆角」教训）；「密码错误」是 `{{LOCKMSG}}` 生成的绝对居中红气泡（屏幕中央）。
 
 ### 触摸事件锁存（`touch_input.c`）
@@ -511,4 +511,10 @@ cp u60pro-devui.stripped u60pro-devui-aarch64
 
 ## Optional speedtest integration
 
-The current speedtest UX is documented in [`SPEEDTEST.md`](SPEEDTEST.md). In short: DevUI does not bundle `better-speedtest`; when `/data/plugins/better-speedtest/better-speedtest` is executable, the first page shows an inline `网络测速` toggle below the signal cards. The old standalone `07-speedtest.html` page has been removed and should not be shipped in current UI packages.
+The current speedtest UX is documented in [`SPEEDTEST.md`](SPEEDTEST.md). In short: DevUI does not bundle `better-speedtest`; when `/data/plugins/better-speedtest/better-speedtest` is executable, the first page shows an inline `网络测速` toggle below the signal cards. Locked preview mode reuses the first page but hides the speedtest entry and native widgets. The old standalone `07-speedtest.html` page has been removed and should not be shipped in current UI packages.
+
+## 2026-07-08 信号卡片与锁屏预览补记
+
+- 第一页默认模板使用 `{{SIGNALCARDS}}` 作为完整信号区；`{{CARRIERS}}` 只作为旧模板兼容令牌保留。信号卡片、未激活/高铁专网标签、ML1 附加指标和锁屏预览边界统一整理到 [`SIGNAL-CARDS.md`](SIGNAL-CARDS.md)。
+- `未激活` 和 `高铁专网` 标签继续使用 `.coff` / `.chsr`，文字在真机字体下上移约 1px 做视觉居中。不要为了修圆角把高铁紫色边框删掉；圆角突出应通过 renderer 按 `border-radius` 裁切背景，或卡片 `overflow:hidden` 处理。
+- 锁屏预览继续复用第一页，但测速入口、测速展开面板和 native gauge/chart 均隐藏；`speedtest_poll()` 保留，避免解锁后测速后端状态滞后。

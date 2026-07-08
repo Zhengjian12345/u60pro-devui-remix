@@ -99,6 +99,8 @@ cp u60pro-devui.stripped u60pro-devui-aarch64
 
 - [docs/UI-GUIDE.md](docs/UI-GUIDE.md) — **自定义界面教程**（令牌、动作、限制、示例）
 - [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) — 架构、构建、数据模型、踩坑记录
+- [docs/SIGNAL-CARDS.md](docs/SIGNAL-CARDS.md) — 第一页信号卡片、未激活/高铁专网标签、锁屏预览口径
+- [docs/SPEEDTEST.md](docs/SPEEDTEST.md) — 可选测速后端、首页内嵌测速面板与锁屏隐藏规则
 - [docs/modem.md](docs/modem.md) — 第二页信令页 / 基站信息页的页面行为与字段口径
 - [docs/DEVUI-IPC.md](docs/DEVUI-IPC.md) — DevUI 内建外部画面接口（像素帧、图片、绘图命令、文字）
 - [docs/HARDWARE.md](docs/HARDWARE.md) — 设备硬件接口

@@ -107,7 +107,8 @@ litehtml 不是浏览器，**限制比较多**，踩坑前先看这里：
 | `{{STATUSBAR}}` | 顶部状态栏：时间（有未读短信时右侧由程序原生绘制一个蓝色信封图标）· 实时网速 · 制式 · 信号格 · 电池 · 电量 |
 | `{{DOTS}}` | 底部翻页圆点，自动高亮当前页 |
 | `{{SMSLIST}}` | 短信页折叠列表（整段）：最多 32 条，每条号码 / 时间 + 一行预览，是可点的 `act:sms:ID` 卡片（点开弹完整内容的二级页面并标为已读），未读条目红点 + 蓝色号码高亮；无短信显示「暂无短信」 |
-| `{{CARRIERS}}` | 信号页载波区：表头（组网模式 · L LTE + M NR 载波 · 总X MHz）+ 每载波一张卡片（频段·频宽 / EARFCN / PCI / RSRP / SINR，按质量上色，未激活置灰） |
+| `{{SIGNALCARDS}}` | 默认第一页的完整信号区：运营商/制式/QCI/AMBR、载波卡片、信令解析附加指标、TA/品牌等高级卡片 |
+| `{{CARRIERS}}` | 兼容旧模板的载波区：表头（组网模式 · L LTE + M NR 载波 · 总X MHz）+ 每载波一张卡片（频段·频宽 / EARFCN / PCI / RSRP / SINR，按质量上色，未激活置灰） |
 | `{{NETSEG}}` | 选网方式分段控件（自动 / 5G SA / 5G NSA / 4G，当前模式高亮，支持点/滑） |
 | `{{TOAST}}` | 居中提示气泡（无提示时为空），如"锁频成功" |
 | `{{PINDOTS}}` | 锁屏键盘的 4 个 PIN 圆点（已输入的高亮，整段） |
@@ -266,4 +267,4 @@ adb push 04-about.html /data/plugins/u60pro-devui/ui/
 
 ## Optional speedtest panel
 
-The first page may show a `网络测速` toggle when `/data/plugins/better-speedtest/better-speedtest` is installed and executable. The panel expands inline below the signal cards and uses DevUI-native drawing for the gauge and line charts. See [`SPEEDTEST.md`](SPEEDTEST.md) for paths, actions, rendering notes, and install/uninstall conventions.
+The first page may show a `网络测速` toggle when `/data/plugins/better-speedtest/better-speedtest` is installed and executable. The panel expands inline below the signal cards and uses DevUI-native drawing for the gauge and line charts. Locked preview mode reuses the first page but hides this speedtest entry and panel; backend detection still runs for after unlock. See [`SPEEDTEST.md`](SPEEDTEST.md) for paths, actions, rendering notes, and install/uninstall conventions.

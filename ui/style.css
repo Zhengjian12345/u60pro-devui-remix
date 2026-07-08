@@ -44,7 +44,7 @@ body.light .batt { background: #1b1d22; color: #ffffff; }
        background: currentColor; vertical-align: middle; }
 
 /* ---- cards ---- */
-.card { margin: 6px 8px 0; border-radius: 8px; padding: 7px 10px; }
+.card { margin: 6px 8px 0; border-radius: 8px; padding: 7px 10px; overflow: hidden; }
 body.dark  .card { background: #23262c; border: 1px solid #323843; }
 body.light .card { background: #ffffff; border: 1px solid #dde1e8; }
 .card.hsrmode { border-color: rgba(167,139,250,.48); }
@@ -111,6 +111,7 @@ body.light .ccd { border-top: 1px solid #e6e9ef; }
   margin: 6px -5px 3px;
   padding: 8px 7px 7px;
   border-radius: 9px;
+  overflow: hidden;
   box-shadow: inset 3px 0 0 #8b5cf6;
 }
 body.dark .ccd.hsrhint {
@@ -129,16 +130,21 @@ body.light .ccd.hsrhint {
 .cm { margin-top: 4px; font-size: 14px; }
 .cm .ml { font-size: 11px; color: #8a929d; margin-right: 4px; }
 .cm .ml2 { margin-left: 22px; }
+.cx { margin-top: 5px; font-size: 10px; line-height: 1.65; color: #9aa2ad; }
+.cx span { display: inline-block; margin: 0 7px 2px 0; padding: 1px 5px; border-radius: 5px; }
+.cx.sigsrc { margin-top: 2px; }
+body.dark .cx span { background: #202630; color: #b9c1ce; }
+body.light .cx span { background: #edf1f6; color: #4b5563; }
 .q-good { color: #4cc56a; font-weight: 700; }
 .q-mid  { color: #e9c244; font-weight: 700; }
 .q-bad  { color: #ec5a40; font-weight: 700; }
 .q-off  { color: #6b7280; font-weight: 700; }       /* configured but not active */
-.coff { display: inline-block; font-size: 10px; line-height: 15px; color: #6b7280;
-        margin-left: 12px; padding: 0 6px; border: 1px solid #4a515c; border-radius: 4px;
-        vertical-align: middle; }
-.chsr { display: inline-block; font-size: 10px; line-height: 15px; color: #f2e8ff;
-        margin-left: 8px; padding: 0 6px; border: 1px solid rgba(196,181,253,.7);
-        border-radius: 999px; background: rgba(124,58,237,.76); vertical-align: middle; }
+.coff, .chsr { display: inline-block; height: 16px; line-height: 12px; font-size: 10px;
+        padding: 0 6px 2px; vertical-align: middle; box-sizing: border-box;
+        position: relative; top: -1px; }
+.coff { color: #6b7280; margin-left: 12px; border: 1px solid #4a515c; border-radius: 4px; }
+.chsr { color: #f2e8ff; margin-left: 8px; border: 1px solid rgba(196,181,253,.7);
+        border-radius: 999px; background: rgba(124,58,237,.76); }
 
 .big { font-size: 26px; font-weight: 700; }
 .muted { color: #8a929d; font-weight: 400; }

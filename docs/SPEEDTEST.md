@@ -9,6 +9,7 @@ This document describes the optional `better-speedtest` integration in `u60pro-d
 - If `/data/plugins/better-speedtest/better-speedtest` exists and is executable, the first page shows a `网络测速` toggle below the signal cards.
 - Tapping `网络测速` expands the speedtest panel inline on the first page. Tapping `收起测速` collapses it.
 - Removing the speedtest backend hides the entry button automatically.
+- Locked preview mode reuses the first page but hides the speedtest toggle, inline panel, and native speedtest widgets.
 - The old optional `07-speedtest.html` standalone page has been removed. Do not ship or install it for the current inline UX.
 
 ## Runtime paths
@@ -24,6 +25,17 @@ DevUI only stores small UI preferences in `devui.conf`:
 - `st_dur`
 
 DevUI does not rewrite `better-speedtest`'s own `config.json`.
+
+## Lock screen behavior
+
+The screen-lock preview (`g_lock_state == 1`) intentionally keeps using the first
+page as a read-only signal overview, but it must not expose speedtest controls.
+
+- `speedtest_home_button_html()` returns empty while locked.
+- `speedtest_home_inline_html()` returns empty while locked.
+- Native gauge/chart drawing is skipped while locked.
+- `speedtest_poll()` still runs, so backend detection and an already-running
+  speedtest state remain fresh after unlock.
 
 ## Actions
 

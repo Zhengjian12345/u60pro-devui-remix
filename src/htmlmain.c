@@ -20,6 +20,7 @@
 #include <dirent.h>
 #include <math.h>
 #include <netinet/in.h>
+#include <pthread.h>
 #include <signal.h>
 #include <stdint.h>
 #include <sys/socket.h>
@@ -28,6 +29,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -62,7 +64,7 @@ static void        maybe_dump_fb(drm_disp_t *d);
 #endif
 #define UI_FONT "/usr/ui/fonts/ZTEZhengYuan.ttf"
 #define DATAD_HTTP_ADDR "127.0.0.1"
-#define DATAD_HTTP_PORT 19460
+#define DATAD_HTTP_PORT 9460
 #define DATAD_HTTP_TIMEOUT_MS 300
 
 static volatile sig_atomic_t g_run = 1;
@@ -258,7 +260,7 @@ static int boot_has_external_power(void)
 
 /* ---- screen lock (4-digit PIN) ---- */
 static char g_pin[8];        /* stored PIN ("" = lock disabled) */
-static int  g_lock_state;    /* 0 = normal, 1 = unlock pad, 2 = setup pad */
+static int  g_lock_state;    /* 0=normal, 1=locked preview, 2=setup pad, 3=unlock pad */
 static char g_pin_entry[8];  /* digits typed so far */
 static int  g_lock_err;      /* 1 = show the unlock-pad error message */
 
@@ -375,6 +377,7 @@ static void fmt_speed_pair(char *buf, size_t cap, long up, long down, int bits) 
 /* ---- {{key}} template substitution ---- */
 struct kv { const char *k; const char *v; };
 static void html_esc(char *dst, size_t cap, const char *src);
+static int signal_value_present(const char *s);
 
 static char *apply_template(const char *tmpl, struct kv *t, int n)
 {
@@ -1071,6 +1074,31 @@ static int path_is_speedtest(const char *path)
     return !strcmp(base, "07-speedtest.html");
 }
 
+static int path_is_signal_detail(const char *path)
+{
+    const char *base = strrchr(path, '/');
+    if (!base) base = path; else base++;
+    return !strcmp(base, "01a-cell.html") || strstr(base, "cell.html") != NULL;
+}
+
+static int path_is_signal_home(const char *path)
+{
+    const char *base = strrchr(path, '/');
+    if (!base) base = path; else base++;
+    return !strcmp(base, "01-signal.html");
+}
+
+static int path_is_signal_page(const char *path)
+{
+    return path_is_signal_home(path) || path_is_signal_detail(path);
+}
+
+static int signal_live_enabled(void)
+{
+    /* Raw reads may stay on for datad, but UI decoded cards obey parse only. */
+    return g_sig_parse;
+}
+
 static int speedtest_page_index(void)
 {
     for (int i = 0; i < g_npages; i++)
@@ -1082,7 +1110,7 @@ static int g_st_home_open = 0;
 
 static const char *speedtest_home_button_html(void)
 {
-    if (!speedtest_binary_ready()) return "";
+    if (g_lock_state || !speedtest_binary_ready()) return "";
     return g_st_home_open ?
            "<a href='act:sttoggle' class='speed-home on'>收起测速</a>" :
            "<a href='act:sttoggle' class='speed-home'>网络测速</a>";
@@ -1298,7 +1326,7 @@ static const char *speedtest_lines_html(void)
 static const char *speedtest_home_inline_html(void)
 {
     static char buf[8192];
-    if (!g_st_home_open || !speedtest_binary_ready()) return "";
+    if (g_lock_state || !g_st_home_open || !speedtest_binary_ready()) return "";
     snprintf(buf, sizeof buf,
              "<div class='st-home-panel'>"
              "%s"
@@ -1408,29 +1436,168 @@ static int hsr_freq_hint(int mcc, const char *arfcn)
     return hsr_freq_is_whitelist(v);
 }
 
+#define SIGNAL_MAX_CARRIERS 16
+
+struct signal_carrier_metric {
+    int valid;
+    int used;
+    char name[32];
+    char type[16];
+    char pci[16];
+    char arfcn[32];
+    char rb[16];
+    char grants[16];
+    char dl_rb[16];
+    char dl_grants[16];
+    char ul_rb[16];
+    char ul_grants[16];
+    char mcs[16];
+    char modulation[32];
+    char mimo[48];
+    char layers[16];
+    char bler[16];
+    char ssb[16];
+    char serving_ssb[16];
+    char ml1_rsrp[16];
+    char ml1_rsrq[16];
+    char ml1_sinr[16];
+};
+
+static void signal_carrier_metric_reset(struct signal_carrier_metric *c)
+{
+    if (!c) return;
+    memset(c, 0, sizeof *c);
+    snprintf(c->name, sizeof c->name, "-");
+    snprintf(c->type, sizeof c->type, "-");
+    snprintf(c->pci, sizeof c->pci, "-");
+    snprintf(c->arfcn, sizeof c->arfcn, "-");
+    snprintf(c->rb, sizeof c->rb, "-");
+    snprintf(c->grants, sizeof c->grants, "-");
+    snprintf(c->dl_rb, sizeof c->dl_rb, "-");
+    snprintf(c->dl_grants, sizeof c->dl_grants, "-");
+    snprintf(c->ul_rb, sizeof c->ul_rb, "-");
+    snprintf(c->ul_grants, sizeof c->ul_grants, "-");
+    snprintf(c->mcs, sizeof c->mcs, "-");
+    snprintf(c->modulation, sizeof c->modulation, "-");
+    snprintf(c->mimo, sizeof c->mimo, "-");
+    snprintf(c->layers, sizeof c->layers, "-");
+    snprintf(c->bler, sizeof c->bler, "-");
+    snprintf(c->ssb, sizeof c->ssb, "-");
+    snprintf(c->serving_ssb, sizeof c->serving_ssb, "-");
+    snprintf(c->ml1_rsrp, sizeof c->ml1_rsrp, "-");
+    snprintf(c->ml1_rsrq, sizeof c->ml1_rsrq, "-");
+    snprintf(c->ml1_sinr, sizeof c->ml1_sinr, "-");
+}
+
+static const char *signal_carrier_val(const char *v)
+{
+    return signal_value_present(v) ? v : "-";
+}
+
+static void carrier_metric_html(char *dst, size_t cap,
+                                const struct signal_carrier_metric *m,
+                                int is_nr)
+{
+    char a[64], b[64], c[64], d[64], e[64], f[64];
+    size_t off;
+
+    if (!dst || cap == 0) return;
+    dst[0] = 0;
+    if (!m || !m->valid) return;
+
+    if (is_nr) {
+        const char *ssb = signal_value_present(m->serving_ssb) ? m->serving_ssb : m->ssb;
+        html_esc(a, sizeof a, signal_carrier_val(m->mimo));
+        html_esc(b, sizeof b, signal_carrier_val(m->layers));
+        html_esc(c, sizeof c, signal_carrier_val(m->dl_grants));
+        html_esc(d, sizeof d, signal_carrier_val(m->ul_grants));
+        html_esc(e, sizeof e, signal_carrier_val(m->dl_rb));
+        html_esc(f, sizeof f, signal_carrier_val(m->ul_rb));
+        snprintf(dst, cap,
+                 "<div class='cx'><span>MIMO %s</span><span>L %s</span>"
+                 "<span>G %s/%s</span><span>RB %s/%s</span>",
+                 a, b, c, d, e, f);
+        html_esc(a, sizeof a, signal_carrier_val(m->bler));
+        html_esc(b, sizeof b, signal_carrier_val(ssb));
+        snprintf(dst + strlen(dst), cap - strlen(dst),
+                 "<span>BLER %s</span><span>SSB %s</span></div>", a, b);
+    } else {
+        const char *mod = signal_value_present(m->modulation) ? m->modulation : m->mcs;
+        html_esc(a, sizeof a, signal_carrier_val(mod));
+        html_esc(b, sizeof b, signal_carrier_val(m->layers));
+        html_esc(c, sizeof c, signal_carrier_val(m->grants));
+        html_esc(d, sizeof d, signal_carrier_val(m->rb));
+        html_esc(e, sizeof e, signal_carrier_val(m->bler));
+        snprintf(dst, cap,
+                 "<div class='cx'><span>MCS %s</span><span>L %s</span>"
+                 "<span>G %s</span><span>RB %s</span><span>BLER %s</span></div>",
+                 a, b, c, d, e);
+    }
+    if (signal_value_present(m->ml1_rsrp) ||
+        signal_value_present(m->ml1_rsrq) ||
+        signal_value_present(m->ml1_sinr)) {
+        html_esc(a, sizeof a, signal_carrier_val(m->ml1_rsrp));
+        html_esc(b, sizeof b, signal_carrier_val(m->ml1_rsrq));
+        html_esc(c, sizeof c, signal_carrier_val(m->ml1_sinr));
+        off = strlen(dst);
+        snprintf(dst + off, cap - off,
+                 "<div class='cx sigsrc'><span>ML1 RSRP %s</span><span>RSRQ %s</span>",
+                 a, b);
+        if (signal_value_present(m->ml1_sinr)) {
+            off = strlen(dst);
+            snprintf(dst + off, cap - off, "<span>SINR %s</span>", c);
+        }
+        off = strlen(dst);
+        snprintf(dst + off, cap - off, "</div>");
+    }
+}
+
 /* Append one carrier card (band/bw + PCI, then RSRP/SINR colored by quality).
  * A carrier reporting the floor sentinel (RSRP <= -140) is "configured but not
  * active"; its values are grayed out and tagged inactive. */
 static int car_row(char *buf, int o, int cap, const char *band, const char *bw,
-                   const char *arfcn, const char *pci, const char *rsrp, const char *sinr,
-                   int hsr_hint)
+                    const char *arfcn, const char *pci, const char *rsrp, const char *sinr,
+                    int hsr_hint, const struct signal_carrier_metric *metric)
 {
-    double rp = atof(rsrp), sn = atof(sinr);
-    int inactive = rp <= -140.0;
-    const char *rq = inactive ? "q-off" : rp >= -85 ? "q-good" : rp >= -105 ? "q-mid" : "q-bad";
-    const char *sq = inactive ? "q-off" : sn >= 13  ? "q-good" : sn >= 0    ? "q-mid" : "q-bad";
-    const char *tag = inactive ? "<span class='coff'>未激活</span>" : "";
+    const char *rsrp_show = signal_value_present(rsrp) ? rsrp : "-";
+    const char *sinr_show = signal_value_present(sinr) ? sinr : "-";
+    int has_rsrp;
+    int has_sinr;
+    double rp;
+    double sn;
+    int inactive;
+    const char *rq;
+    const char *sq;
+    const char *tag;
     const char *hsr = hsr_hint ? "<span class='chsr'>高铁专网</span>" : "";
-    const char *al = (band[0] == 'n') ? "ARFCN" : "EARFCN";   /* NR vs LTE */
+    int is_nr_metric = band && band[0] == 'n';
+    const char *al = is_nr_metric ? "ARFCN" : "EARFCN";
+    char bw_text[20];
+    char extra[768];
+
+    has_rsrp = signal_value_present(rsrp_show);
+    has_sinr = signal_value_present(sinr_show);
+    rp = has_rsrp ? atof(rsrp_show) : -150.0;
+    sn = has_sinr ? atof(sinr_show) : -99.0;
+    inactive = has_rsrp && rp <= -140.0;
+    rq = !has_rsrp || inactive ? "q-off" : rp >= -85 ? "q-good" : rp >= -105 ? "q-mid" : "q-bad";
+    sq = !has_sinr || inactive ? "q-off" : sn >= 13  ? "q-good" : sn >= 0    ? "q-mid" : "q-bad";
+    tag = inactive ? "<span class='coff'>未激活</span>" : "";
+    carrier_metric_html(extra, sizeof extra, metric, is_nr_metric);
+    if (signal_value_present(bw))
+        snprintf(bw_text, sizeof bw_text, "%sM", bw);
+    else
+        snprintf(bw_text, sizeof bw_text, "-");
     return o + snprintf(buf + o, cap - o,
-        "<div class='ccd%s%s'><span class='cb'>%s</span><span class='cbw'> %sM</span>%s%s"
+        "<div class='ccd%s%s'><span class='cb'>%s</span><span class='cbw'> %s</span>%s%s"
         "<span class='cinfo'><span class='carfcn'>%s %s</span><span class='cpci'>PCI %s</span></span>"
         "<div class='cm'><span class='ml'>RSRP</span><span class='%s'>%s</span>"
-        "<span class='ml ml2'>SINR</span><span class='%s'>%s</span></div></div>",
+        "<span class='ml ml2'>SINR</span><span class='%s'>%s</span></div>%s</div>",
         inactive ? " off" : "", hsr_hint ? " hsrhint" : "",
-        band, (bw && bw[0]) ? bw : "-", tag, hsr,
+        band, bw_text, tag, hsr,
         al, (arfcn && arfcn[0]) ? arfcn : "-", (pci && pci[0]) ? pci : "-",
-        rq, (rsrp && rsrp[0]) ? rsrp : "-", sq, (sinr && sinr[0]) ? sinr : "-");
+        rq, rsrp_show, sq, sinr_show,
+        extra);
 }
 
 static int carrier_is_inactive(const char *rsrp)
@@ -1964,19 +2131,38 @@ static int signal_cache_get(const char *key, char *dst, size_t cap)
 
 static void signal_cache_put(const char *key, const char *value)
 {
-    FILE *fp;
+    FILE *in;
+    FILE *out;
+    char line[256];
     char old[128];
+    char tmp_path[sizeof(SIGNAL_CACHE_PATH) + 8];
+    size_t key_len;
 
     if (!key || !value || !value[0] || !strcmp(value, "-") ||
         !strcmp(value, "已关闭"))
         return;
+    if (strchr(key, '=') || strchr(key, '\n') || strchr(value, '\n') ||
+        strchr(value, '\r'))
+        return;
     if (signal_cache_get(key, old, sizeof old) && !strcmp(old, value))
         return;
-    fp = fopen(SIGNAL_CACHE_PATH, "a");
-    if (!fp)
+    snprintf(tmp_path, sizeof tmp_path, "%s.tmp", SIGNAL_CACHE_PATH);
+    out = fopen(tmp_path, "w");
+    if (!out)
         return;
-    fprintf(fp, "%s=%s\n", key, value);
-    fclose(fp);
+    key_len = strlen(key);
+    in = fopen(SIGNAL_CACHE_PATH, "r");
+    if (in) {
+        while (fgets(line, sizeof line, in)) {
+            if (!strncmp(line, key, key_len) && line[key_len] == '=')
+                continue;
+            fputs(line, out);
+        }
+        fclose(in);
+    }
+    fprintf(out, "%s=%s\n", key, value);
+    if (fclose(out) != 0 || rename(tmp_path, SIGNAL_CACHE_PATH) != 0)
+        unlink(tmp_path);
 }
 
 struct signal_bundle {
@@ -2010,6 +2196,10 @@ struct signal_bundle {
     char nr_beam[128];
     char nr_serving_ssb[32];
     char nr_vendor[64];
+    int lte_carrier_n;
+    int nr_carrier_n;
+    struct signal_carrier_metric lte_carriers[SIGNAL_MAX_CARRIERS];
+    struct signal_carrier_metric nr_carriers[SIGNAL_MAX_CARRIERS];
 };
 
 static void signal_bundle_reset(struct signal_bundle *b)
@@ -2045,6 +2235,12 @@ static void signal_bundle_reset(struct signal_bundle *b)
     snprintf(b->nr_beam, sizeof b->nr_beam, "-");
     snprintf(b->nr_serving_ssb, sizeof b->nr_serving_ssb, "-");
     snprintf(b->nr_vendor, sizeof b->nr_vendor, "-");
+    b->lte_carrier_n = 0;
+    b->nr_carrier_n = 0;
+    for (int i = 0; i < SIGNAL_MAX_CARRIERS; i++) {
+        signal_carrier_metric_reset(&b->lte_carriers[i]);
+        signal_carrier_metric_reset(&b->nr_carriers[i]);
+    }
 }
 
 static int signal_value_present(const char *s)
@@ -2074,18 +2270,182 @@ static void signal_metric_get(const char *obj, const char *key, char *dst, size_
         snprintf(dst, cap, "%s", tmp);
 }
 
+static void signal_copy_value(char *dst, size_t cap, const char *src)
+{
+    size_t n;
+
+    if (!dst || cap == 0)
+        return;
+    if (!src)
+        src = "";
+    n = strlen(src);
+    if (n >= cap)
+        n = cap - 1;
+    memcpy(dst, src, n);
+    dst[n] = 0;
+}
+
+static int signal_json_next_object(const char **pp, char *dst, size_t cap)
+{
+    const char *p;
+    size_t n = 0;
+    int depth = 0;
+    int in_str = 0;
+
+    if (!pp || !*pp || !dst || cap == 0)
+        return 0;
+    p = *pp;
+    while (*p && *p != '{')
+        p++;
+    if (*p != '{')
+        return 0;
+    while (*p && n < cap - 1) {
+        char ch = *p;
+        if (in_str) {
+            if (ch == '\\' && p[1]) {
+                dst[n++] = *p++;
+                if (n < cap - 1)
+                    dst[n++] = *p++;
+                continue;
+            }
+            if (ch == '"')
+                in_str = 0;
+        } else {
+            if (ch == '"')
+                in_str = 1;
+            else if (ch == '{')
+                depth++;
+            else if (ch == '}') {
+                depth--;
+                dst[n++] = *p++;
+                if (depth == 0)
+                    break;
+                continue;
+            }
+        }
+        dst[n++] = *p++;
+    }
+    dst[n] = 0;
+    *pp = p;
+    return depth == 0 && n > 0;
+}
+
+static void signal_carrier_metric_get(const char *obj, const char *key,
+                                      char *dst, size_t cap)
+{
+    char tmp[96];
+
+    if (!obj || !key || !dst || cap == 0)
+        return;
+    if (json_get(obj, key, tmp, sizeof tmp) && signal_value_present(tmp))
+        signal_copy_value(dst, cap, tmp);
+}
+
+static int signal_parse_carriers(const char *parent, int is_nr,
+                                 struct signal_carrier_metric *out, int max)
+{
+    char arr[16384];
+    char obj[1536];
+    const char *p;
+    int n = 0;
+
+    if (!parent || !out || max <= 0)
+        return 0;
+    if (!json_get(parent, "carriers", arr, sizeof arr))
+        return 0;
+    p = arr;
+    while (n < max && signal_json_next_object(&p, obj, sizeof obj)) {
+        struct signal_carrier_metric *m = &out[n];
+        signal_carrier_metric_reset(m);
+        m->valid = 1;
+        signal_carrier_metric_get(obj, "name", m->name, sizeof m->name);
+        signal_carrier_metric_get(obj, "type", m->type, sizeof m->type);
+        signal_carrier_metric_get(obj, "pci", m->pci, sizeof m->pci);
+        signal_carrier_metric_get(obj, is_nr ? "nrarfcn" : "earfcn", m->arfcn, sizeof m->arfcn);
+        signal_carrier_metric_get(obj, "rb", m->rb, sizeof m->rb);
+        signal_carrier_metric_get(obj, "grants", m->grants, sizeof m->grants);
+        signal_carrier_metric_get(obj, "dl_rb", m->dl_rb, sizeof m->dl_rb);
+        signal_carrier_metric_get(obj, "dl_grants", m->dl_grants, sizeof m->dl_grants);
+        signal_carrier_metric_get(obj, "ul_rb", m->ul_rb, sizeof m->ul_rb);
+        signal_carrier_metric_get(obj, "ul_grants", m->ul_grants, sizeof m->ul_grants);
+        signal_carrier_metric_get(obj, "mcs", m->mcs, sizeof m->mcs);
+        signal_carrier_metric_get(obj, "modulation", m->modulation, sizeof m->modulation);
+        signal_carrier_metric_get(obj, "mimo", m->mimo, sizeof m->mimo);
+        signal_carrier_metric_get(obj, "layers", m->layers, sizeof m->layers);
+        signal_carrier_metric_get(obj, "bler_pct", m->bler, sizeof m->bler);
+        signal_carrier_metric_get(obj, "ssb", m->ssb, sizeof m->ssb);
+        signal_carrier_metric_get(obj, "serving_ssb", m->serving_ssb, sizeof m->serving_ssb);
+        signal_carrier_metric_get(obj, "ml1_rsrp", m->ml1_rsrp, sizeof m->ml1_rsrp);
+        signal_carrier_metric_get(obj, "ml1_rsrq", m->ml1_rsrq, sizeof m->ml1_rsrq);
+        signal_carrier_metric_get(obj, "ml1_sinr", m->ml1_sinr, sizeof m->ml1_sinr);
+        n++;
+    }
+    return n;
+}
+
+static int signal_carrier_is_pcell(const struct signal_carrier_metric *m)
+{
+    if (!m || !m->valid)
+        return 0;
+    return !strcasecmp(m->type, "PCell") || !strcasecmp(m->name, "PCell");
+}
+
+static int signal_carrier_same_text(const char *a, const char *b)
+{
+    return signal_value_present(a) && signal_value_present(b) && !strcmp(a, b);
+}
+
+static struct signal_carrier_metric *signal_pick_carrier_metric(struct signal_carrier_metric *list,
+                                                               int n,
+                                                               const char *pci,
+                                                               const char *arfcn,
+                                                               int prefer_pcell)
+{
+    struct signal_carrier_metric *pcell_fallback = NULL;
+
+    if (!list || n <= 0)
+        return NULL;
+
+    for (int i = 0; i < n; i++) {
+        struct signal_carrier_metric *m = &list[i];
+        if (!m->valid || m->used)
+            continue;
+        if (prefer_pcell && !signal_carrier_is_pcell(m))
+            continue;
+        if (!prefer_pcell && signal_carrier_is_pcell(m))
+            continue;
+        if (signal_carrier_same_text(m->arfcn, arfcn)) {
+            if (signal_value_present(m->pci) && signal_value_present(pci) &&
+                !signal_carrier_same_text(m->pci, pci))
+                continue;
+            m->used = 1;
+            return m;
+        }
+        if (prefer_pcell && signal_carrier_same_text(m->pci, pci)) {
+            m->used = 1;
+            return m;
+        }
+        if (prefer_pcell && !pcell_fallback)
+            pcell_fallback = m;
+    }
+
+    if (pcell_fallback)
+        pcell_fallback->used = 1;
+    return prefer_pcell ? pcell_fallback : NULL;
+}
+
 static void signal_bundle_apply_metrics(struct signal_bundle *b)
 {
-    char json[4096];
-    char lte[1024];
-    char nr[1600];
+    static char json[32768];
+    static char lte[8192];
+    static char nr[24576];
     FILE *fp;
     size_t n;
     int rc;
 
     if (!b || !g_sig_read)
         return;
-    fp = popen("/usr/bin/wget -T 1 -qO- 'http://127.0.0.1:19460/modem/signal-metrics' 2>/dev/null", "r");
+    fp = popen("/usr/bin/wget -T 1 -qO- 'http://127.0.0.1:9460/modem/signal-metrics' 2>/dev/null", "r");
     if (!fp)
         return;
     n = fread(json, 1, sizeof(json) - 1, fp);
@@ -2106,6 +2466,8 @@ static void signal_bundle_apply_metrics(struct signal_bundle *b)
         signal_metric_get(lte, "bler_pct", b->lte_bler, sizeof b->lte_bler);
         signal_metric_get(lte, "pusch", b->lte_pusch, sizeof b->lte_pusch);
         signal_metric_get(lte, "pucch", b->lte_pucch, sizeof b->lte_pucch);
+        b->lte_carrier_n = signal_parse_carriers(lte, 0, b->lte_carriers,
+                                                 SIGNAL_MAX_CARRIERS);
     }
     if (json_get(json, "nr", nr, sizeof nr)) {
         signal_metric_get(nr, "ta", b->nr_ta, sizeof b->nr_ta);
@@ -2123,6 +2485,8 @@ static void signal_bundle_apply_metrics(struct signal_bundle *b)
         signal_metric_get(nr, "ports", b->nr_ports, sizeof b->nr_ports);
         signal_metric_get(nr, "ssb", b->nr_beam, sizeof b->nr_beam);
         signal_metric_get(nr, "serving_ssb", b->nr_serving_ssb, sizeof b->nr_serving_ssb);
+        b->nr_carrier_n = signal_parse_carriers(nr, 1, b->nr_carriers,
+                                                SIGNAL_MAX_CARRIERS);
     }
     if (!signal_value_present(b->ta)) {
         if (signal_value_present(b->nr_ta))
@@ -2191,7 +2555,7 @@ static int fetch_signal_raw_int_field(const char *kind, const char *const *keys,
     if (!dst || cap == 0 || !kind || !keys || nkeys == 0 || !g_sig_read)
         return 0;
     if (snprintf(cmd, sizeof cmd,
-                 "/usr/bin/wget -T 1 -qO- 'http://127.0.0.1:19460/modem/latest?kind=%s' 2>/dev/null",
+                 "/usr/bin/wget -T 1 -qO- 'http://127.0.0.1:9460/modem/latest?kind=%s' 2>/dev/null",
                  kind) >= (int)sizeof cmd)
         return 0;
 
@@ -2338,7 +2702,7 @@ static int fetch_signal_bundle(struct signal_bundle *out)
     };
 
     if (out) signal_bundle_reset(out);
-    if (cached_at && (uint32_t)(now - cached_at) < 900) {
+    if (cached_at && (uint32_t)(now - cached_at) < 50) {
         if (out) *out = cached;
         return cached_valid;
     }
@@ -2346,7 +2710,7 @@ static int fetch_signal_bundle(struct signal_bundle *out)
     cached_at = now;
     cached_valid = 0;
     signal_bundle_reset(&cached);
-    fp = popen("/usr/bin/wget -T 1 -qO- 'http://127.0.0.1:19460/modem/latest-signals' 2>/dev/null", "r");
+    fp = popen("/usr/bin/wget -T 1 -qO- 'http://127.0.0.1:9460/modem/latest-signals' 2>/dev/null", "r");
     if (!fp) {
         if (out) *out = cached;
         return 0;
@@ -2419,6 +2783,111 @@ static int fetch_signal_bundle(struct signal_bundle *out)
     return cached_valid;
 }
 
+static pthread_mutex_t g_signal_async_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_t g_signal_async_thread;
+static int g_signal_async_started;
+static int g_signal_async_valid;
+static uint32_t g_signal_async_at;
+static struct signal_bundle g_signal_async_bundle;
+
+static int signal_async_snapshot(struct signal_bundle *out)
+{
+    int ok;
+    uint32_t max_age;
+
+    if (!out)
+        return 0;
+    pthread_mutex_lock(&g_signal_async_lock);
+    ok = g_signal_async_valid;
+    max_age = (uint32_t)((g_refresh_ms > 0 ? g_refresh_ms : 1000) * 2 + 250);
+    if (ok && g_signal_async_at &&
+        (uint32_t)(millis() - g_signal_async_at) > max_age)
+        ok = 0;
+    if (ok)
+        *out = g_signal_async_bundle;
+    pthread_mutex_unlock(&g_signal_async_lock);
+    return ok;
+}
+
+static void signal_async_publish(const struct signal_bundle *src, int valid)
+{
+    pthread_mutex_lock(&g_signal_async_lock);
+    if (src && valid) {
+        g_signal_async_bundle = *src;
+        g_signal_async_valid = 1;
+        g_signal_async_at = millis();
+    } else {
+        signal_bundle_reset(&g_signal_async_bundle);
+        g_signal_async_valid = 0;
+        g_signal_async_at = 0;
+    }
+    pthread_mutex_unlock(&g_signal_async_lock);
+}
+
+static void *signal_async_worker(void *arg)
+{
+    uint32_t next_at = 0;
+    int was_enabled = 0;
+    int last_wait_ms = 0;
+
+    (void)arg;
+    signal_async_publish(NULL, 0);
+    while (g_run) {
+        int enabled = signal_live_enabled();
+        int wait_ms = g_refresh_ms > 0 ? g_refresh_ms : 1000;
+        uint32_t now = millis();
+
+        if (!enabled) {
+            if (was_enabled)
+                signal_async_publish(NULL, 0);
+            was_enabled = 0;
+            next_at = 0;
+            usleep(100000);
+            continue;
+        }
+        if (g_refresh_ms <= 0) {
+            next_at = 0;
+            usleep(100000);
+            continue;
+        }
+        if (wait_ms != last_wait_ms) {
+            next_at = 0;
+            last_wait_ms = wait_ms;
+        }
+
+        was_enabled = 1;
+        if (next_at == 0 || (int32_t)(now - next_at) >= 0) {
+            struct signal_bundle tmp;
+            int ok;
+
+            signal_bundle_reset(&tmp);
+            ok = fetch_signal_bundle(&tmp);
+            if (ok)
+                signal_async_publish(&tmp, 1);
+            next_at = millis() + (uint32_t)wait_ms;
+        }
+        usleep(50000);
+    }
+    return NULL;
+}
+
+static void signal_async_start(void)
+{
+    if (g_signal_async_started)
+        return;
+    signal_bundle_reset(&g_signal_async_bundle);
+    if (pthread_create(&g_signal_async_thread, NULL, signal_async_worker, NULL) == 0)
+        g_signal_async_started = 1;
+}
+
+static void signal_async_stop(void)
+{
+    if (!g_signal_async_started)
+        return;
+    (void)pthread_join(g_signal_async_thread, NULL);
+    g_signal_async_started = 0;
+}
+
 static int json_pick_int_string(const char *obj, const char *const *keys, size_t nkeys,
                                 char *dst, size_t cap)
 {
@@ -2466,7 +2935,7 @@ static int fetch_signal_raw_field(const char *kind, const char *const *keys, siz
     snprintf(dst, cap, "-");
     if (!g_sig_read) return 0;
     if (snprintf(cmd, sizeof cmd,
-                 "/usr/bin/wget -T 1 -qO- 'http://127.0.0.1:19460/modem/latest?kind=%s' 2>/dev/null",
+                 "/usr/bin/wget -T 1 -qO- 'http://127.0.0.1:9460/modem/latest?kind=%s' 2>/dev/null",
                  kind) >= (int)sizeof cmd)
         return 0;
     fp = popen(cmd, "r");
@@ -2548,7 +3017,7 @@ static int fetch_signal_recent_raw_field(const char *kind, const char *const *ke
     if (!dst || cap == 0) return 0;
     if (!g_sig_read) return 0;
     if (snprintf(cmd, sizeof cmd,
-                 "/usr/bin/wget -T 1 -qO- 'http://127.0.0.1:19460/modem/recent?kind=%s&limit=96' 2>/dev/null",
+                 "/usr/bin/wget -T 1 -qO- 'http://127.0.0.1:9460/modem/recent?kind=%s&limit=96' 2>/dev/null",
                  kind) >= (int)sizeof cmd)
         return 0;
     fp = popen(cmd, "r");
@@ -2573,7 +3042,7 @@ static int fetch_signal_raw_vendor(const char *kind, char *dst, size_t cap)
     if (!dst || cap == 0 || !g_sig_read)
         return 0;
     if (snprintf(cmd, sizeof cmd,
-                 "/usr/bin/wget -T 1 -qO- 'http://127.0.0.1:19460/modem/latest?kind=%s' 2>/dev/null",
+                 "/usr/bin/wget -T 1 -qO- 'http://127.0.0.1:9460/modem/latest?kind=%s' 2>/dev/null",
                  kind) >= (int)sizeof cmd)
         return 0;
     fp = popen(cmd, "r");
@@ -2786,7 +3255,7 @@ static int fetch_lte_ta(int *ta_out)
 
     cached_at = now;
     cached_valid = cached_ta >= 0;
-    fp = popen("/usr/bin/wget -T 1 -qO- 'http://127.0.0.1:19460/modem/latest?kind=lte_ml1_raw' 2>/dev/null", "r");
+    fp = popen("/usr/bin/wget -T 1 -qO- 'http://127.0.0.1:9460/modem/latest?kind=lte_ml1_raw' 2>/dev/null", "r");
     if (fp) {
         n = fread(json, 1, sizeof(json) - 1, fp);
         rc = pclose(fp);
@@ -2795,7 +3264,7 @@ static int fetch_lte_ta(int *ta_out)
             if (!strncmp(json, "null", 4)) {
                 if ((uint32_t)(now - enable_req_at) >= 5000 &&
                     snprintf(cmd, sizeof cmd,
-                            "/usr/bin/wget -qO- --post-data='' 'http://127.0.0.1:19460/modem/control?ml1_raw=1&active=1' >/dev/null 2>&1")
+                            "/usr/bin/wget -qO- --post-data='' 'http://127.0.0.1:9460/modem/control?ml1_raw=1&active=1' >/dev/null 2>&1")
                         < (int)sizeof cmd) {
                     (void)system(cmd);
                     enable_req_at = now;
@@ -2806,7 +3275,7 @@ static int fetch_lte_ta(int *ta_out)
         }
     }
     if (fresh_ta < 0) {
-        fp = popen("/usr/bin/wget -T 1 -qO- 'http://127.0.0.1:19460/modem/recent?kind=lte_ml1_raw&log_origin=direct&limit=64' 2>/dev/null", "r");
+        fp = popen("/usr/bin/wget -T 1 -qO- 'http://127.0.0.1:9460/modem/recent?kind=lte_ml1_raw&log_origin=direct&limit=64' 2>/dev/null", "r");
         if (fp) {
             n = fread(json, 1, sizeof(json) - 1, fp);
             rc = pclose(fp);
@@ -2886,7 +3355,8 @@ static void fmt_ta_distance(char *dst, size_t cap, int ta, double unit_m)
 /* Fill a kv table from the current device state. Buffers are static. */
 static int build_kv(struct kv *t, const char *path)
 {
-    int is_cellinfo = path && strstr(path, "cell.html") != NULL;
+    int is_cellinfo = path_is_signal_detail(path);
+    int is_signalhome = path_is_signal_home(path);
     int is_charts = path && strstr(path, "charts.html") != NULL;
     g_phase++;
 
@@ -2895,13 +3365,13 @@ static int build_kv(struct kv *t, const char *path)
     static char s_rxb[16], s_txb[16], s_cpu[8], s_mem[8], w_rsrp[6], w_rsrq[6], w_sinr[6], w_bw[6];
     static char s_oper[48], s_ssid[64], s_key[64], s_page[8], s_np[8], s_model[64], s_fw[80];
     static char s_qci[8], s_ambr[24], s_sbar[640], s_dots[320], s_ta[16], s_tadist[24];
-    static char s_nrports[64], s_nrbeam[128], s_nrvendor[64], s_sigadvstate[64], s_signalcards[8000];
+    static char s_nrports[64], s_nrbeam[128], s_nrvendor[64], s_sigadvstate[64], s_sigrefresh[16], s_signalcards[10000];
     static char s_last_lte_nas[128] = "-";
         static char s_last_nr_nas[128] = "-";
         static char s_last_nrports[64] = "-";
         static char s_last_nrbeam[128] = "-";
         static char s_last_nrvendor[64] = "-";
-        static char s_nrrows[1500], s_lterows[1700], s_carriers[4000], s_nr_block[2200], s_lte_block[2200], s_sigcards[5000], s_gen[8];
+        static char s_nrrows[4096], s_lterows[4096], s_carriers[9000], s_nr_block[6000], s_lte_block[5000], s_sigcards[11000], s_gen[8];
 
     static devui_data_t d;
     static struct signal_bundle sig;
@@ -2914,6 +3384,8 @@ static int build_kv(struct kv *t, const char *path)
     time_t now = time(NULL); struct tm tmv; localtime_r(&now, &tmv);
     if (now != h_last) { hist_push(&d); h_last = now; }   /* sample once per second */
     snprintf(s_time, sizeof s_time, "%02d:%02d", tmv.tm_hour, tmv.tm_min);
+    snprintf(s_sigrefresh, sizeof s_sigrefresh, "%02d:%02d:%02d",
+             tmv.tm_hour, tmv.tm_min, tmv.tm_sec);
     snprintf(s_bat, sizeof s_bat, "%d", d.bat_percent);
     snprintf(s_rsrp, sizeof s_rsrp, "%d", d.nr_rsrp);
     snprintf(s_rsrq, sizeof s_rsrq, "%d", d.nr_rsrq);
@@ -2983,8 +3455,16 @@ static int build_kv(struct kv *t, const char *path)
     int show_nr_nas = is_sa;
     int nr_cc = 0, nr_bw = 0, lte_cc = 0, lte_bw = 0;
     int nr_show_cc = 0, nr_show_bw = 0, lte_show_cc = 0, lte_show_bw = 0, no = 0, lo = 0;
-    char rp[12], pc[12], ac[16];
+    char rp[12] = "-", pc[12] = "-", ac[16] = "-";
     const char *nr_band = d.nr_band[0] ? d.nr_band : d.band;
+
+    signal_bundle_reset(&sig);
+    if (signal_live_enabled() && (is_cellinfo || is_signalhome)) {
+        if (!signal_async_snapshot(&sig)) {
+            if (fetch_signal_bundle(&sig))
+                signal_async_publish(&sig, 1);
+        }
+    }
 
     if (is_cellinfo) {
         char c_lte_rrc[96], c_lte_nas[96], c_nr_rrc[96], c_nr_nas[96];
@@ -3006,8 +3486,6 @@ static int build_kv(struct kv *t, const char *path)
         static char s_last_ltebler[64] = "-";
         int so = 0;
 
-        signal_bundle_reset(&sig);
-        (void)fetch_signal_bundle(&sig);
         if (signal_value_present(sig.cell_key) &&
             strcmp(sig.cell_key, s_last_signal_cell_key) != 0) {
             snprintf(s_last_signal_cell_key, sizeof s_last_signal_cell_key, "%s", sig.cell_key);
@@ -3020,7 +3498,7 @@ static int build_kv(struct kv *t, const char *path)
         }
         signal_value_keep_last(sig.lte_nas, sizeof sig.lte_nas, s_last_lte_nas, sizeof s_last_lte_nas);
         signal_value_keep_last(sig.nr_nas, sizeof sig.nr_nas, s_last_nr_nas, sizeof s_last_nr_nas);
-        if (!g_sig_read) {
+        if (!signal_live_enabled()) {
             snprintf(s_lteta, sizeof s_lteta, "已关闭");
             snprintf(s_nrta, sizeof s_nrta, "已关闭");
             snprintf(s_nrports, sizeof s_nrports, "已关闭");
@@ -3200,11 +3678,12 @@ static int build_kv(struct kv *t, const char *path)
         s_signalcards[0] = 0;
         so += snprintf(s_signalcards + so, sizeof s_signalcards - so,
                        "<div class='card'><div class='title'>基站品牌识别</div><table class='sigtab'>"
+                       "<tr><td class='kv-l'>刷新时间</td><td class='val'>%s</td></tr>"
                        "<tr><td class='kv-l'>识别结果</td><td class='val sm'>%s</td></tr>"
                        "<tr><td class='kv-l'>TA</td><td class='val'>%s</td></tr>"
                        "<tr><td class='kv-l'>估算距离</td><td class='val'>%s</td></tr>"
                        "</table></div>",
-                       e_nrvendor, s_ta, s_tadist);
+                       s_sigrefresh, e_nrvendor, s_ta, s_tadist);
         if (show_nr) {
             if (show_nr_nas) {
                 so += snprintf(s_signalcards + so, sizeof s_signalcards - so,
@@ -3283,10 +3762,12 @@ static int build_kv(struct kv *t, const char *path)
     /* NR carriers: PCell from main fields + nrca SCells */
     s_nrrows[0] = 0;
     if (show_nr && nr_band[0] && d.nr_bw[0]) {
+        struct signal_carrier_metric *metric;
         snprintf(rp, sizeof rp, "%d", d.nr_rsrp); snprintf(pc, sizeof pc, "%d", d.nr_pci);
         snprintf(ac, sizeof ac, "%ld", d.nr_channel);
+        metric = signal_pick_carrier_metric(sig.nr_carriers, sig.nr_carrier_n, pc, ac, 1);
         no = car_row(s_nrrows, no, sizeof s_nrrows, nr_band, d.nr_bw, ac, pc, rp, d.nr_snr,
-                     hsr_freq_hint(d.mcc, ac));
+                     hsr_freq_hint(d.mcc, ac), metric);
         nr_show_cc = 1; nr_show_bw = atoi(d.nr_bw);
         if (!carrier_is_inactive(rp)) { nr_cc = 1; nr_bw = atoi(d.nr_bw); }
     }
@@ -3299,16 +3780,19 @@ static int build_kv(struct kv *t, const char *path)
                 double rpv = (nf > 7 && f[7] && f[7][0]) ? atof(f[7]) : 0.0;
                 char bn[12]; snprintf(bn, sizeof bn, "n%s", f[3]);
                 const char *nr_ac = nf > 4 ? f[4] : "-";
+                const char *nr_pci = nf > 1 ? f[1] : "-";
+                struct signal_carrier_metric *metric =
+                    signal_pick_carrier_metric(sig.nr_carriers, sig.nr_carrier_n,
+                                               nr_pci, nr_ac, 0);
                 no = car_row(s_nrrows, no, sizeof s_nrrows, bn, f[5], nr_ac,
-                             nf > 1 ? f[1] : "-", nf > 7 ? f[7] : "-", nf > 9 ? f[9] : "-",
-                             hsr_freq_hint(d.mcc, nr_ac));
+                             nr_pci, nf > 7 ? f[7] : "-", nf > 9 ? f[9] : "-",
+                             hsr_freq_hint(d.mcc, nr_ac), metric);
                 nr_show_cc++;
                 nr_show_bw += atoi(f[5]);
                 if (rpv > -140.0) { nr_cc++; nr_bw += atoi(f[5]); }
             }
         }
     }
-
     /* LTE carriers: support both legacy 5-field and newer 11-field groups. */
     s_lterows[0] = 0;
     if (show_lte) {
@@ -3354,8 +3838,13 @@ static int build_kv(struct kv *t, const char *path)
                     if (d.lte_rsrp) snprintf(lr, sizeof lr, "%d", d.lte_rsrp);
                     if (d.lte_snr[0]) snprintf(ls, sizeof ls, "%s", d.lte_snr);
                 }
+                struct signal_carrier_metric *metric =
+                    signal_pick_carrier_metric(sig.lte_carriers, sig.lte_carrier_n,
+                                               f_pci ? f_pci : "-", f_arfcn ? f_arfcn : "-",
+                                               gi == 0);
                 lo = car_row(s_lterows, lo, sizeof s_lterows, bn, f_bw, f_arfcn ? f_arfcn : "-",
-                             f_pci ? f_pci : "-", lr, ls, hsr_freq_hint(d.mcc, f_arfcn));
+                             f_pci ? f_pci : "-", lr, ls, hsr_freq_hint(d.mcc, f_arfcn),
+                             metric);
                 lte_show_cc++;
                 lte_show_bw += atoi(f_bw);
                 if (!carrier_is_inactive(lr)) { lte_cc++; lte_bw += atoi(f_bw); }
@@ -3978,7 +4467,7 @@ static void render(drm_disp_t *disp, const char *path)
         }
     }
     draw_charts();      /* native polylines into any #chart-* placeholders */
-    if (is_speedtest || g_st_home_open) draw_speedtest_widgets();
+    if (!g_lock_state && (is_speedtest || g_st_home_open)) draw_speedtest_widgets();
     draw_native_statusbar();
     draw_sms_icon();    /* native envelope in the status bar when unread SMS */
     if (strstr(path, "menu.html")) draw_power_menu();   /* round power buttons */
@@ -4075,7 +4564,7 @@ static void render_page_to_pair_buf(uint16_t *buf, const char *path, const char 
     html_view_render_to_scroll(buf, html, scroll);
     html_view_target_begin(buf, scroll);
     draw_charts();
-    if (path_is_speedtest(path) || g_st_home_open) draw_speedtest_widgets();
+    if (!g_lock_state && (path_is_speedtest(path) || g_st_home_open)) draw_speedtest_widgets();
     draw_native_statusbar();
     draw_sms_icon();
     html_view_target_end();
@@ -4120,7 +4609,7 @@ static void scroll_blit(drm_disp_t *d, int scroll)
     }
     html_view_set_scroll(scroll);
     draw_charts();
-    if (path_is_speedtest(g_pages[g_cur]) || g_st_home_open) draw_speedtest_widgets();
+    if (!g_lock_state && (path_is_speedtest(g_pages[g_cur]) || g_st_home_open)) draw_speedtest_widgets();
     /* The native status bar is pinned; dragging only changes the content below it.
      * With the framebuffer rotated 180 degrees, that content maps to the top
      * framebuffer rows, so the dirty rectangle intentionally excludes the tail. */
@@ -4258,6 +4747,8 @@ int main(void)
     (void)datad_set_refresh_ms(g_refresh_ms);
     (void)datad_set_signal_read(g_sig_read);
     (void)datad_set_signal_parse(g_sig_parse);
+    if (!g_charge_boot)
+        signal_async_start();
     if (g_saved_bright >= 0) backlight_set(g_saved_bright);   /* restore brightness */
     if (!g_charge_boot) {
         load_pin();
@@ -4449,6 +4940,7 @@ int main(void)
                         if (!strcmp(a, "sigread")) {
                             g_sig_read = !g_sig_read;
                             (void)datad_set_signal_read(g_sig_read);
+                            signal_async_publish(NULL, 0);
                             save_conf();
                             snprintf(g_toast, sizeof g_toast, "信令读取已%s", g_sig_read ? "开启" : "关闭");
                             g_toast_until = now + 1600;
@@ -4457,6 +4949,7 @@ int main(void)
                         } else if (!strcmp(a, "sigparse")) {
                             g_sig_parse = !g_sig_parse;
                             (void)datad_set_signal_parse(g_sig_parse);
+                            signal_async_publish(NULL, 0);
                             save_conf();
                             rescan_pages_keep_current();
                             invalidate_render_html_cache();
@@ -5019,6 +5512,8 @@ action_done:
                     state_render = 1;
                     state_pending = 0;
                 }
+                if (g_refresh_ms > 0 && signal_live_enabled() && path_is_signal_page(CUR_PATH))
+                    state_render = 1;
                 if (state_render) need_render = 1;
                 if (ext_ok && devui_ext_active(&ext) && !g_lock_state &&
                     (clock_changed || (g_refresh_ms > 0 && state_changed)))
@@ -5038,7 +5533,7 @@ action_done:
         int st_poll_ms = (g_st_state == ST_STATE_RUNNING || g_st_home_open) ? 300 : 900;
         if (!dragging && !scroll_inertia && now - g_st_poll_at >= (uint32_t)st_poll_ms) {
             int st_changed = speedtest_poll(now);
-            if ((path_is_speedtest(CUR_PATH) || g_st_home_open) && (st_changed || g_st_state == ST_STATE_RUNNING))
+            if (!g_lock_state && (path_is_speedtest(CUR_PATH) || g_st_home_open) && (st_changed || g_st_state == ST_STATE_RUNNING))
                 need_render = 1;
         }
 
@@ -5053,6 +5548,7 @@ action_done:
     }
 
     if (ext_ok) devui_ext_close(&ext);
+    signal_async_stop();
     data_backend_close();
     drm_disp_close(&disp);
     return 0;

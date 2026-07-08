@@ -234,6 +234,17 @@ class fb_container : public document_container {
                     put_px(x, y, c.red, c.green, c.blue, c.alpha);
     }
 
+    void fill_background_box(const background_layer &layer, web_color c) {
+        const position &b = layer.border_box;
+        const border_radiuses &br = layer.border_radius;
+        if (br.top_left_x > 0 || br.top_right_x > 0 || br.bottom_right_x > 0 || br.bottom_left_x > 0)
+            fill_rounded(b.x, b.y, b.width, b.height,
+                         (int)br.top_left_x, (int)br.top_right_x,
+                         (int)br.bottom_right_x, (int)br.bottom_left_x, c);
+        else
+            fill(b.x, b.y, b.width, b.height, c);
+    }
+
 public:
     uint_ptr create_font(const font_description &d, const document *, font_metrics *fm) override {
         auto *f = new ft_font();
@@ -296,23 +307,17 @@ public:
     const char *get_default_font_name() const override { return "sans-serif"; }
 
     void draw_solid_fill(uint_ptr, const background_layer &layer, const web_color &color) override {
-        const position &b = layer.border_box;
-        const border_radiuses &br = layer.border_radius;
-        if (br.top_left_x > 0 || br.top_right_x > 0 || br.bottom_right_x > 0 || br.bottom_left_x > 0)
-            fill_rounded(b.x, b.y, b.width, b.height,
-                         (int)br.top_left_x, (int)br.top_right_x, (int)br.bottom_right_x, (int)br.bottom_left_x, color);
-        else
-            fill(b.x, b.y, b.width, b.height, color);
+        fill_background_box(layer, color);
     }
     /* Approximate gradients with a representative flat dark color. */
     void draw_linear_gradient(uint_ptr, const background_layer &l, const background_layer::linear_gradient &) override {
-        fill(l.border_box.x, l.border_box.y, l.border_box.width, l.border_box.height, web_color(45, 46, 50));
+        fill_background_box(l, web_color(45, 46, 50));
     }
     void draw_radial_gradient(uint_ptr, const background_layer &l, const background_layer::radial_gradient &) override {
-        fill(l.border_box.x, l.border_box.y, l.border_box.width, l.border_box.height, web_color(45, 46, 50));
+        fill_background_box(l, web_color(45, 46, 50));
     }
     void draw_conic_gradient(uint_ptr, const background_layer &l, const background_layer::conic_gradient &) override {
-        fill(l.border_box.x, l.border_box.y, l.border_box.width, l.border_box.height, web_color(45, 46, 50));
+        fill_background_box(l, web_color(45, 46, 50));
     }
 
     void draw_borders(uint_ptr, const borders &b, const position &p, bool) override {

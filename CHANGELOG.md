@@ -2,6 +2,27 @@
 
 > 当前正式命名与安装路径已经统一为：`zwrt-datad`、`/data/plugins/zwrt-datad/zwrt-datad`、`/data/plugins/u60pro-devui/`、`/data/plugins/u60pro-devui/ui`。历史条目里如果出现 `u60-datad`、`/data/u60pro` 或 `/data/ui`，表示当时版本记录。
 
+## v1.2.7 - 2026-07-08
+
+### 变更
+
+- **锁屏预览隐藏测速 UI**：锁屏预览继续复用第一页实时信号卡片，但不再显示 `网络测速` 入口、展开面板或 native gauge/chart；测速后端检测和轮询仍保留，解锁后状态不滞后。
+- **高铁/未激活标签视觉收口**：保留高铁专网卡片的紫色边框和左侧强调线，仅微调 `未激活`、`高铁专网` 标签的文字垂直位置。
+
+### 修复
+
+- **圆角卡片背景突出**：HTML 渲染器现在对 solid/gradient 背景统一按 `border-radius` 裁切，避免紫色高铁卡片角落露出方形背景。
+
+### 文档
+
+- 新增 [`docs/SIGNAL-CARDS.md`](docs/SIGNAL-CARDS.md)，整理第一页信号卡片、SCC 数据来源、未激活/高铁专网标签、锁屏预览和临时标签预览流程。
+- 更新 [`docs/SPEEDTEST.md`](docs/SPEEDTEST.md)、[`docs/UI-GUIDE.md`](docs/UI-GUIDE.md) 和 [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md)，同步锁屏测速隐藏规则和 `{{SIGNALCARDS}}` 令牌口径。
+
+### 验证
+
+- 已在 ubuntu 编译机完成正式构建，发布资产 `u60pro-devui-aarch64` SHA256 `c01edfbc2480383677968e54fd545ec5aa06282ea435ba7ac0f4ea2afead1d9c`。
+- 已推到 U60 实机验证：锁屏预览无测速入口，标签预览页显示正常，正式 `01-signal.html` 已恢复。
+
 ## v1.2.5 - 2026-07-04
 
 ### 变更

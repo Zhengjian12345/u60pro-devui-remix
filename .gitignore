@@ -20,10 +20,16 @@
 
 # Debug / capture artifacts
 /fb.dump
+/*.dump
+/*.b64txt
 *.ppm
 after_swipe.png
 frame_*.png
 screenshot.png
+/label-*.png
+/lockscreen-*.png
+/screen-*.png
+/u60pro-devui.new
 /previews/
 /-S
 

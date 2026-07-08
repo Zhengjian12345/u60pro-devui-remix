@@ -12,6 +12,8 @@ UI_DIR=$DEVUI_DIR/ui
 LEGACY_UI_DIR=/data/ui
 DEVUI_BIN=$DEVUI_DIR/u60pro-devui
 DATAD_BIN=$DATAD_DIR/zwrt-datad
+DATAD_LAN_PORT=${DATAD_LAN_PORT:-9461}
+DATAD_TOKEN_FILE=${DATAD_TOKEN_FILE:-$DATAD_DIR/auth.token}
 DATAD_MODEM_REMOTE_STREAM=${DATAD_MODEM_REMOTE_STREAM:-1}
 DATAD_MODEM_REMOTE_STALE_SEC=${DATAD_MODEM_REMOTE_STALE_SEC:-6}
 MODE="${1:-legacy}"
@@ -90,7 +92,8 @@ start_datad_legacy() {
     killall -9 u60-datad 2>/dev/null
     nohup env DATAD_MODEM_REMOTE_STREAM="$DATAD_MODEM_REMOTE_STREAM" \
         DATAD_MODEM_REMOTE_STALE_SEC="$DATAD_MODEM_REMOTE_STALE_SEC" \
-        "$DATAD_BIN" -i 1000 -p 19460 >/tmp/zwrt-datad.log 2>&1 </dev/null &
+        "$DATAD_BIN" -i 1000 --lan-port "$DATAD_LAN_PORT" \
+        --auth-token-file "$DATAD_TOKEN_FILE" >/tmp/zwrt-datad.log 2>&1 </dev/null &
     sleep 1
 }
 

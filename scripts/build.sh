@@ -59,7 +59,7 @@ echo ">> building..."
 for f in $APPS; do
   obj="/tmp/$(basename "${f%.c}").o"
   # shellcheck disable=SC2086
-  $CC $CFLAGS -c "$f" -o "$obj"
+  $CC $CFLAGS -pthread -c "$f" -o "$obj"
   OBJS="$OBJS $obj"
 done
 
@@ -68,7 +68,7 @@ CXXFLAGS="-std=c++17 -O2 -w -Iinclude -I$FT_DIR/include -I$LH_DIR/include -I$LH_
 OBJS="$OBJS /tmp/html_view.o"
 
 # shellcheck disable=SC2086
-"$CXX" -static $OBJS "$LH_DIR/lib/liblitehtml.a" "$FT_LIB" -Wl,--gc-sections -lm -o u60pro-devui
+"$CXX" -static $OBJS "$LH_DIR/lib/liblitehtml.a" "$FT_LIB" -Wl,--gc-sections -pthread -lm -o u60pro-devui
 echo ">> link OK"
 "$TC/aarch64-linux-size" u60pro-devui
 "$TC/aarch64-linux-strip" -o u60pro-devui.stripped u60pro-devui 2>/dev/null || true
