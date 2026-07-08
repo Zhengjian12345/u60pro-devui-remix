@@ -2,6 +2,30 @@
 
 > 当前正式命名与安装路径已经统一为：`zwrt-datad`、`/data/plugins/zwrt-datad/zwrt-datad`、`/data/plugins/u60pro-devui/`、`/data/plugins/u60pro-devui/ui`。历史条目里如果出现 `u60-datad`、`/data/u60pro` 或 `/data/ui`，表示当时版本记录。
 
+## v1.2.9 - 2026-07-09
+
+### 变更
+
+- **更多功能二级页**：默认顶层页收敛为信号、更多功能、图表和系统设置；WiFi、短信、信令读取、锁频和可选测速入口迁移到 `02-functions.html` 下的二级页面，减少左右滑动页数。
+- **自定义功能入口**：新增 `/data/plugins/u60pro-devui/ui/functions/*.html` 扫描能力，自定义页面会自动出现在“更多功能”页；示例放在 `examples/custom-functions/`，不会默认打进 UI 包。
+- **邻小区列表**：第一页新增 `{{NEIGHBORCARDS}}`，信令解析开启时可展开显示 LTE/NR 邻区，每行显示 `PCI / 频段 / RSRP / RSRQ`；解析开关关闭时整张邻区卡片隐藏。
+- **循环测速**：测速二级页增加“循环”时长，循环模式橙色提示并持续测速，直到用户点击停止；测速日志改为卡片呈现。
+- **触控快速响应**：触摸队列扩大并改为普通 UI 动作只消费最新 tap/stroke，避免快速连滑后慢慢回放一串历史动作。
+
+### 修复
+
+- **浅色图表填充色**：折线图和测速图表的下方填充重新跟随曲线颜色，不再在浅色模式落成灰色。
+- **二级页滚动与返回**：二级页使用独立返回动作和滚动状态，返回后不污染顶层页滑动位置。
+
+### 文档
+
+- 更新 [`docs/UI-GUIDE.md`](docs/UI-GUIDE.md)、[`docs/SPEEDTEST.md`](docs/SPEEDTEST.md)、[`docs/SIGNAL-CARDS.md`](docs/SIGNAL-CARDS.md) 和 [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md)，同步更多功能页、自定义功能目录、循环测速和邻小区显示规则。
+
+### 验证
+
+- 已在 ubuntu 编译机完成正式构建，发布资产 `u60pro-devui-aarch64` SHA256 `4bc5180923f0156a0848ad9dddb18b8732bb5e57069777e8e9af077aad9d210e`。
+- 已推到 U60 实机验证：更多功能页、测速二级页、邻小区展开/隐藏和快速触控响应正常。
+
 ## v1.2.8 - 2026-07-08
 
 ### 修复

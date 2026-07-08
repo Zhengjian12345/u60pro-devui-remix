@@ -704,9 +704,6 @@ extern "C" void html_view_polyline(int x, int y, int w, int h,
     if (vmax <= vmin) vmax = vmin + 1;
 
     if (fill_a > 0) {
-        int sr = r * 25 / 100;
-        int sg = g * 25 / 100;
-        int sb = b * 25 / 100;
         for (int col = 0; col < w; col++) {
             double t = (n > 1) ? (double)col / (w - 1) * (n - 1) : 0.0;
             int i0 = (int)t; double fr = t - i0;
@@ -715,7 +712,7 @@ extern "C" void html_view_polyline(int x, int y, int w, int h,
             if (v < vmin) v = vmin; if (v > vmax) v = vmax;
             int py = y + (h - 1) - (int)((v - vmin) * (h - 1) / (vmax - vmin));
             for (int yy = py; yy < y + h; yy++)
-                if (((col + yy) & 1) == 0) put_px(x + col, yy, sr, sg, sb, 255);
+                if (((col + yy) & 1) == 0) put_px(x + col, yy, r, g, b, fill_a);
         }
     }
 

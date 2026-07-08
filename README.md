@@ -25,11 +25,11 @@
 - **渲染**：[litehtml](https://github.com/litehtml/litehtml)（HTML/CSS 排版）+ FreeType（含 CJK 字体）→ 直接画进 RGB565 framebuffer。无浏览器、无 JavaScript；状态只经本机 `127.0.0.1` 的 HTTP/SSE 读取。
 - **显示**：[src/drm_disp.c](src/drm_disp.c) 打开 `/dev/dri/card0`，运行时枚举面板/crtc/mode，映射 RGB565 dumb framebuffer，通过 `DIRTYFB` 提交。
 - **触摸**：[src/touch_input.c](src/touch_input.c) 自动探测触摸屏并缩放坐标；电源键短按息屏、长按菜单。
-- **界面**：`/data/plugins/u60pro-devui/ui` 下每个 `NN-名字.html` 一页，`style.css` 共享样式。HTML 里的 `{{令牌}}` 由程序替换成实时数据，`href="act:xxx"` 触发交互。
+- **界面**：`/data/plugins/u60pro-devui/ui` 下每个顶层 `NN-名字.html` 一页，`style.css` 共享样式；`ui/subpages/` 提供二级页面，`ui/functions/` 可放用户自定义功能页。HTML 里的 `{{令牌}}` 由程序替换成实时数据，`href="act:xxx"` 触发交互。
 - **外部接口**：内建本地 `DEVUI-IPC`，保留原生状态栏；其他进程可直接把内容投到状态栏下方的内容区，并通过点击事件日志驱动自己的交互逻辑。
 - **后端**：配套 `zwrt-datad`（[github.com/33333s/zwrt-datad](https://github.com/33333s/zwrt-datad)），轮询 `ubus` 后通过 `GET /state` 和 `SSE /events` 提供完整 JSON 快照；UI 只读这个本机接口，自己从不碰 ubus。
 
-自带的示例界面（[ui/](ui/)）含六页：信号、短信、WiFi、选网/锁频、图表、系统设置。系统页包含亮度/息屏/锁屏、USB-C 供电方向、USB 网络共享、速率单位和主题等开关。
+自带的示例界面（[ui/](ui/)）含四个顶层页：信号、更多功能、图表、系统设置。“更多功能”里进入 WiFi、短信、信令读取、锁频和可选测速二级页；系统页包含亮度/息屏/锁屏、USB-C 供电方向、USB 网络共享、速率单位和主题等开关。
 
 ## 构建
 
@@ -79,8 +79,8 @@ adb shell '/etc/init.d/zte_topsw_devui stop; sleep 1;
 ```jsonc
 // 本仓库 version.json
 { "schema": 1,
-  "devui": { "version": "1.2.5", "asset": "u60pro-devui-aarch64" },
-  "ui":    { "version": "0.4.5", "asset": "ui.tar.gz" } }
+  "devui": { "version": "1.2.9", "asset": "u60pro-devui-aarch64" },
+  "ui":    { "version": "0.4.8", "asset": "ui.tar.gz" } }
 ```
 
 插件读各项目 **latest release** 的 `version.json`，与本地记录比对，支持**单独更新** datad / devui / ui 或一键更新全部。默认更新源就是 GitHub release；如果你自己在外部做镜像，只要保持 `u60pro-devui-aarch64` / `ui.tar.gz` / `version.json` 这些文件名不变即可，本仓库不再维护单独的网盘同步流程。
@@ -100,7 +100,7 @@ cp u60pro-devui.stripped u60pro-devui-aarch64
 - [docs/UI-GUIDE.md](docs/UI-GUIDE.md) — **自定义界面教程**（令牌、动作、限制、示例）
 - [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) — 架构、构建、数据模型、踩坑记录
 - [docs/SIGNAL-CARDS.md](docs/SIGNAL-CARDS.md) — 第一页信号卡片、未激活/高铁专网标签、锁屏预览口径
-- [docs/SPEEDTEST.md](docs/SPEEDTEST.md) — 可选测速后端、首页内嵌测速面板与锁屏隐藏规则
+- [docs/SPEEDTEST.md](docs/SPEEDTEST.md) — 可选测速后端、二级测速页、循环测速和锁屏隐藏规则
 - [docs/modem.md](docs/modem.md) — 第二页信令页 / 基站信息页的页面行为与字段口径
 - [docs/DEVUI-IPC.md](docs/DEVUI-IPC.md) — DevUI 内建外部画面接口（像素帧、图片、绘图命令、文字）
 - [docs/HARDWARE.md](docs/HARDWARE.md) — 设备硬件接口

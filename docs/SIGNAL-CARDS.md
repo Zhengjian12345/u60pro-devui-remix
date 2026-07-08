@@ -7,9 +7,10 @@ modem 解码、回放和 raw log 归 `zwrt-datad` 维护；这里只记录 DevUI
 ## 页面入口
 
 - `ui/01-signal.html` 使用 `{{SIGNALCARDS}}` 作为默认第一页的完整信号区。
+- `{{NEIGHBORCARDS}}` 放在 `{{SIGNALCARDS}}` 后面，作为可展开的邻小区列表入口。
 - `{{CARRIERS}}` 继续保留给旧自定义模板，只展开载波列表。
-- 默认首页把 `{{STHOMEBTN}}` 和 `{{STHOMEINLINE}}` 放在 `{{SIGNALCARDS}}`
-  之后，所以可选测速面板和信号卡片在视觉上保持分离。
+- 测速入口已经迁移到“更多功能”二级页；首页不再直接放 `{{STHOMEBTN}}`
+  或 `{{STHOMEINLINE}}`。
 
 ## 载波数据归属
 
@@ -22,6 +23,15 @@ modem 解码、回放和 raw log 归 `zwrt-datad` 维护；这里只记录 DevUI
 - LTE 附加指标可显示 MCS/modulation、layers、grants、RB、BLER、ML1
   RSRP/RSRQ/SINR。
 - 没有新鲜可信值时显示 `-`；不要在不同载波之间编造或串用旧值。
+
+## 邻小区
+
+- 邻小区来自 `zwrt-datad` 的 `/modem/signal-metrics` 中 `lte.neighbors` 和
+  `nr.neighbors` 数组。
+- 默认首页只显示一张“邻小区”入口卡，点击后展开列表；再次点击“收起”折叠。
+- 每个 LTE/NR 邻区一行，从左到右固定显示 `PCI / 频段 / RSRP / RSRQ`。
+- 信令解析开关关闭时，`{{NEIGHBORCARDS}}` 返回空串，入口和展开卡片都隐藏。
+- 邻小区仅作为附加观测，不替换 PCell/SCC 的原始数据来源。
 
 ## 未激活载波
 
@@ -54,8 +64,7 @@ modem 解码、回放和 raw log 归 `zwrt-datad` 维护；这里只记录 DevUI
 - 锁屏预览态（`g_lock_state == 1`）复用第一页 `g_pages[0]`，并在屏幕下方画
   原生锁图标。
 - 预览态是只读概览：滑动进入 PIN 键盘，普通页面动作不应该暴露为可用控件。
-- 预览态隐藏可选测速 UI：`{{STHOMEBTN}}`、`{{STHOMEINLINE}}` 返回空串，
-  native gauge/chart 也不绘制。
+- 预览态隐藏可选测速 UI；测速二级页入口和 native gauge/chart 都不暴露。
 - `speedtest_poll()` 保持运行，这样解锁后仍能立即显示测速后端是否存在以及
   正在测速/已完成的状态。
 

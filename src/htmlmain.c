@@ -62,6 +62,7 @@ static void        maybe_dump_fb(drm_disp_t *d);
 #ifndef UI_DIR
 #define UI_DIR "/data/plugins/u60pro-devui/ui"
 #endif
+#define FUNCTIONS_DIR UI_DIR "/functions"
 #define UI_FONT "/usr/ui/fonts/ZTEZhengYuan.ttf"
 #define DATAD_HTTP_ADDR "127.0.0.1"
 #define DATAD_HTTP_PORT 9460
@@ -92,6 +93,8 @@ static int g_tmpl_next;
 /* ---- pages / theme ---- */
 static char g_pages[24][288];
 static int  g_npages, g_cur;
+static char g_subpage[64];       /* non-empty = a second-level page under ui/subpages */
+static char g_subpage_path[300];
 static int  g_theme;      /* 0 = dark, 1 = light */
 static int  g_show_key;   /* reveal WiFi password (default hidden) */
 static int  g_show_cellid; /* reveal NR Cell ID (default hidden) */
@@ -109,10 +112,13 @@ static int  g_autooff_ms; /* auto screen-off timeout, 0 = never */
 static int  g_refresh_ms = 1000; /* state refresh interval, 0 = paused */
 static int  g_sig_read;   /* ML1/raw signaling read switch */
 static int  g_sig_parse;  /* decoded LTE/NR signaling parse switch + page visibility */
+static int  g_neighbor_open; /* expand neighbor-cell list on the first signal page */
 static int  g_saved_bright = -1; /* persisted backlight level, -1 = none yet */
 enum { ST_STATE_MISSING = 0, ST_STATE_IDLE, ST_STATE_RUNNING, ST_STATE_DONE, ST_STATE_FAIL };
 #define SPEEDTEST_BIN "/data/plugins/better-speedtest/better-speedtest"
 #define SPEEDTEST_LOG "/tmp/better-speedtest.log"
+#define SPEEDTEST_LOOP_FLAG "/tmp/better-speedtest.loop"
+#define SPEEDTEST_LOOP_PID "/tmp/better-speedtest.loop.pid"
 static char g_st_src[16] = "auto";
 static char g_st_dir[8] = "both";
 static int  g_st_dur = 15;
@@ -440,9 +446,18 @@ static long long file_mtime_ns(const char *path)
     return (long long)st.st_mtime * 1000000000LL + (long long)st.st_mtim.tv_nsec;
 }
 
+static long long ui_scan_mtime_ns(void)
+{
+    long long a = file_mtime_ns(UI_DIR);
+    long long b = file_mtime_ns(FUNCTIONS_DIR);
+    if (a < 0) a = 0;
+    if (b < 0) b = 0;
+    return a ^ (b << 1);
+}
+
 static int rescan_pages_if_changed(void)
 {
-    long long mtime = file_mtime_ns(UI_DIR);
+    long long mtime = ui_scan_mtime_ns();
     if (mtime < 0 || mtime == g_pages_dir_mtime) return 0;
     g_pages_dir_mtime = mtime;
     rescan_pages_keep_current();
@@ -828,8 +843,14 @@ static const char *speedtest_norm_dir(const char *dir)
 
 static int speedtest_norm_dur(int sec)
 {
+    if (sec == 0) return 0;   /* 0 = loop until stopped by the user */
     if (sec == 10 || sec == 15 || sec == 20) return sec;
     return 15;
+}
+
+static int speedtest_loop_mode(void)
+{
+    return g_st_dur == 0;
 }
 
 static void speedtest_apply_saved_prefs(void)
@@ -847,6 +868,15 @@ static int speedtest_binary_ready(void)
 static int speedtest_running(void)
 {
     return system("pidof better-speedtest >/dev/null 2>&1") == 0;
+}
+
+static int speedtest_loop_running(void)
+{
+    long pid = 0;
+    if (access(SPEEDTEST_LOOP_FLAG, F_OK) != 0) return 0;
+    if (read_long_path(SPEEDTEST_LOOP_PID, &pid) && pid > 0 && kill((pid_t)pid, 0) == 0)
+        return 1;
+    return speedtest_running();
 }
 
 static void speedtest_clear_data(void)
@@ -991,7 +1021,9 @@ static int speedtest_poll(uint32_t now_ms)
     if (g_st_installed < 0) g_st_installed = 0;
     {
         int running = speedtest_running();
+        int loop_running = speedtest_loop_running();
         char *log = read_file(SPEEDTEST_LOG);
+        if (loop_running) running = 1;
         if (log && log[0]) {
             char *save = NULL;
             speedtest_clear_data();
@@ -1000,6 +1032,8 @@ static int speedtest_poll(uint32_t now_ms)
                 speedtest_parse_line(line);
             if (running) {
                 if (!g_st_have_result && g_st_state != ST_STATE_FAIL)
+                    g_st_state = ST_STATE_RUNNING;
+                if (loop_running && g_st_have_result)
                     g_st_state = ST_STATE_RUNNING;
             } else if (g_st_have_result) {
                 g_st_state = ST_STATE_DONE;
@@ -1030,7 +1064,7 @@ static int speedtest_poll(uint32_t now_ms)
 
 static void speedtest_start(void)
 {
-    char cmd[512], extra[32] = "";
+    char cmd[768], extra[32] = "";
     speedtest_apply_saved_prefs();
     g_st_installed = speedtest_binary_ready();
     if (!g_st_installed) {
@@ -1046,9 +1080,23 @@ static void speedtest_start(void)
     speedtest_hist_clear();
     snprintf(g_st_msg, sizeof g_st_msg, "正在启动");
     g_st_state = ST_STATE_RUNNING;
-    snprintf(cmd, sizeof cmd,
-             "rm -f " SPEEDTEST_LOG "; : > " SPEEDTEST_LOG "; " SPEEDTEST_BIN " test --json --src %s --dur %d%s > " SPEEDTEST_LOG " 2>&1 &",
-             g_st_src, g_st_dur, extra);
+    if (speedtest_loop_mode()) {
+        snprintf(cmd, sizeof cmd,
+                 "rm -f " SPEEDTEST_LOG " " SPEEDTEST_LOOP_PID "; : > " SPEEDTEST_LOG "; touch " SPEEDTEST_LOOP_FLAG "; "
+                 "(while [ -f " SPEEDTEST_LOOP_FLAG " ]; do "
+                 ": > " SPEEDTEST_LOG "; "
+                 "echo '{\"phase\":\"start\",\"msg\":\"循环测速中，手动停止前不会自动结束\"}' >> " SPEEDTEST_LOG "; "
+                 SPEEDTEST_BIN " test --json --src %s --dur 15%s >> " SPEEDTEST_LOG " 2>&1; "
+                 "sleep 1; "
+                 "done) & echo $! > " SPEEDTEST_LOOP_PID,
+                 g_st_src, extra);
+    } else {
+        unlink(SPEEDTEST_LOOP_FLAG);
+        unlink(SPEEDTEST_LOOP_PID);
+        snprintf(cmd, sizeof cmd,
+                 "rm -f " SPEEDTEST_LOG "; : > " SPEEDTEST_LOG "; " SPEEDTEST_BIN " test --json --src %s --dur %d%s > " SPEEDTEST_LOG " 2>&1 &",
+                 g_st_src, g_st_dur, extra);
+    }
     if (system(cmd) != 0) {
         speedtest_hist_clear();
         snprintf(g_st_err, sizeof g_st_err, "启动失败");
@@ -1058,7 +1106,10 @@ static void speedtest_start(void)
 
 static void speedtest_stop(void)
 {
-    system("for p in $(pidof better-speedtest 2>/dev/null); do kill -9 $p; done");
+    unlink(SPEEDTEST_LOOP_FLAG);
+    system("if [ -s " SPEEDTEST_LOOP_PID " ]; then kill -9 $(cat " SPEEDTEST_LOOP_PID ") 2>/dev/null || true; fi; "
+           "for p in $(pidof better-speedtest 2>/dev/null); do kill -9 $p; done");
+    unlink(SPEEDTEST_LOOP_PID);
     unlink(SPEEDTEST_LOG);
     speedtest_clear_data();
     speedtest_hist_clear();
@@ -1071,7 +1122,8 @@ static int path_is_speedtest(const char *path)
 {
     const char *base = strrchr(path, '/');
     if (!base) base = path; else base++;
-    return !strcmp(base, "07-speedtest.html");
+    return !strcmp(base, "07-speedtest.html") || !strcmp(base, "speedtest.html") ||
+           strstr(base, "-speedtest.html") != NULL;
 }
 
 static int path_is_signal_detail(const char *path)
@@ -1106,6 +1158,109 @@ static int speedtest_page_index(void)
     return -1;
 }
 
+static int subpage_name_ok(const char *name)
+{
+    size_t l;
+    if (!name || !*name) return 0;
+    if (strstr(name, "..") || strchr(name, '/') || strchr(name, '\\')) return 0;
+    if (strpbrk(name, "\"'<>&")) return 0;
+    l = strlen(name);
+    return l > 5 && strcmp(name + l - 5, ".html") == 0;
+}
+
+static int subpage_open(const char *name)
+{
+    char path[300];
+    if (!subpage_name_ok(name)) return 0;
+    snprintf(path, sizeof path, "%s/subpages/%s", UI_DIR, name);
+    if (access(path, R_OK) != 0) return 0;
+    snprintf(g_subpage, sizeof g_subpage, "%s", name);
+    snprintf(g_subpage_path, sizeof g_subpage_path, "%s", path);
+    g_scroll = 0;
+    return 1;
+}
+
+static int function_page_open(const char *name)
+{
+    char path[300];
+    if (!subpage_name_ok(name)) return 0;
+    snprintf(path, sizeof path, "%s/%s", FUNCTIONS_DIR, name);
+    if (access(path, R_OK) != 0) return 0;
+    snprintf(g_subpage, sizeof g_subpage, "func:%s", name);
+    snprintf(g_subpage_path, sizeof g_subpage_path, "%s", path);
+    g_scroll = 0;
+    return 1;
+}
+
+static void subpage_close(void)
+{
+    g_subpage[0] = 0;
+    g_subpage_path[0] = 0;
+    g_scroll = 0;
+}
+
+static const char *active_page_path(void)
+{
+    if (g_subpage[0]) return g_subpage_path;
+    if (g_npages > 0 && g_cur >= 0 && g_cur < g_npages) return g_pages[g_cur];
+    return "";
+}
+
+static int path_is_function_page(const char *path)
+{
+    size_t l = strlen(FUNCTIONS_DIR);
+    return path && !strncmp(path, FUNCTIONS_DIR, l) && path[l] == '/';
+}
+
+static void function_label_from_name(char *dst, size_t cap, const char *name)
+{
+    size_t l;
+    if (!dst || cap == 0) return;
+    dst[0] = 0;
+    if (!name) return;
+    l = strlen(name);
+    if (l > 5 && !strcmp(name + l - 5, ".html")) l -= 5;
+    if (l >= cap) l = cap - 1;
+    memcpy(dst, name, l);
+    dst[l] = 0;
+    for (size_t i = 0; dst[i]; i++)
+        if (dst[i] == '_' || dst[i] == '-') dst[i] = ' ';
+}
+
+static int function_title_from_html(const char *html, char *dst, size_t cap)
+{
+    const char *p, *gt, *end;
+    size_t l;
+    if (!html || !dst || cap == 0) return 0;
+    p = strcasestr(html, "<title");
+    if (!p) return 0;
+    gt = strchr(p, '>');
+    if (!gt) return 0;
+    gt++;
+    end = strcasestr(gt, "</title>");
+    if (!end || end <= gt) return 0;
+    while (gt < end && (*gt == ' ' || *gt == '\t' || *gt == '\r' || *gt == '\n')) gt++;
+    while (end > gt && (end[-1] == ' ' || end[-1] == '\t' || end[-1] == '\r' || end[-1] == '\n')) end--;
+    l = (size_t)(end - gt);
+    if (l >= cap) l = cap - 1;
+    memcpy(dst, gt, l);
+    dst[l] = 0;
+    return dst[0] != 0;
+}
+
+static void function_title_for_file(char *dst, size_t cap, const char *path, const char *name)
+{
+    char *html = read_file(path);
+    if (html) {
+        if (function_title_from_html(html, dst, cap)) {
+            free(html);
+            return;
+        }
+        free(html);
+    }
+    function_label_from_name(dst, cap, name);
+}
+
 static int g_st_home_open = 0;
 
 static const char *speedtest_home_button_html(void)
@@ -1114,6 +1269,58 @@ static const char *speedtest_home_button_html(void)
     return g_st_home_open ?
            "<a href='act:sttoggle' class='speed-home on'>收起测速</a>" :
            "<a href='act:sttoggle' class='speed-home'>网络测速</a>";
+}
+
+static const char *speedtest_function_tile_html(void)
+{
+    if (!speedtest_binary_ready()) return "";
+    return "<a href='act:sub:speedtest.html' class='func-tile ft-speed'>"
+           "<span class='func-name'>网络测速</span>"
+           "<span class='func-desc'>打开完整测速仪表盘</span>"
+           "</a>";
+}
+
+static const char *custom_function_tiles_html(void)
+{
+    static char buf[8192];
+    char names[32][64];
+    int n = 0;
+    DIR *dp;
+    struct dirent *de;
+    int o = 0;
+
+    buf[0] = 0;
+    mkdir(FUNCTIONS_DIR, 0755);
+    dp = opendir(FUNCTIONS_DIR);
+    if (!dp) return buf;
+    while ((de = readdir(dp)) && n < 32) {
+        if (de->d_name[0] == '.') continue;
+        if (!subpage_name_ok(de->d_name)) continue;
+        snprintf(names[n], sizeof names[n], "%s", de->d_name);
+        n++;
+    }
+    closedir(dp);
+    for (int i = 0; i < n; i++)
+        for (int j = i + 1; j < n; j++)
+            if (strcmp(names[i], names[j]) > 0) {
+                char t[64]; strcpy(t, names[i]); strcpy(names[i], names[j]); strcpy(names[j], t);
+            }
+
+    for (int i = 0; i < n; i++) {
+        char path[300], raw[96], title[160], href[160];
+        snprintf(path, sizeof path, "%s/%s", FUNCTIONS_DIR, names[i]);
+        function_title_for_file(raw, sizeof raw, path, names[i]);
+        html_esc(title, sizeof title, raw);
+        html_esc(href, sizeof href, names[i]);
+        o += snprintf(buf + o, sizeof buf - o,
+                      "<a href=\"act:func:%s\" class=\"func-tile func-custom\">"
+                      "<span class=\"func-name\">%s</span>"
+                      "<span class=\"func-desc\">自定义页面</span>"
+                      "</a>",
+                      href, title);
+        if (o >= (int)sizeof(buf) - 256) break;
+    }
+    return buf;
 }
 
 static const char *speedtest_src_html(void)
@@ -1144,21 +1351,29 @@ static const char *speedtest_dir_html(void)
 
 static const char *speedtest_dur_html(void)
 {
-    static const struct { int sec; const char *lab; } opts[3] = {
-        { 10, "10s" }, { 15, "15s" }, { 20, "20s" } };
-    static char buf[320];
+    static const struct { int sec; const char *lab; } opts[4] = {
+        { 10, "10s" }, { 15, "15s" }, { 20, "20s" }, { 0, "循环" } };
+    static char buf[420];
     int o = snprintf(buf, sizeof buf, "<div class='stseg'>");
-    for (int i = 0; i < 3; i++)
+    for (int i = 0; i < 4; i++)
         o += snprintf(buf + o, sizeof buf - o, "<a href='act:stdur:%d' class='stsegc%s'>%s</a>",
-                      opts[i].sec, g_st_dur == opts[i].sec ? " on" : "", opts[i].lab);
+                      opts[i].sec,
+                      g_st_dur == opts[i].sec ? (opts[i].sec == 0 ? " loop on" : " on") : (opts[i].sec == 0 ? " loop" : ""),
+                      opts[i].lab);
     snprintf(buf + o, sizeof buf - o, "</div>");
     return buf;
+}
+
+static const char *speedtest_loop_hint_html(void)
+{
+    if (!speedtest_loop_mode()) return "";
+    return "<div class='stloop-warn'>循环测速不会自动停止，注意流量消耗。</div>";
 }
 
 static const char *speedtest_install_html(void)
 {
     static char buf[256], esc[160];
-    if (g_st_installed > 0) return "<div class='sthint ok'>已检测到测速器</div>";
+    if (g_st_installed > 0) return "";
     html_esc(esc, sizeof esc, SPEEDTEST_BIN);
     snprintf(buf, sizeof buf, "<div class='sthint bad'>未安装：<span class='mono'>%s</span></div>", esc);
     return buf;
@@ -1168,6 +1383,7 @@ static const char *speedtest_action_html(void)
 {
     if (g_st_installed <= 0) return "<span class='stbtn dis'>安装后可用</span>";
     if (g_st_state == ST_STATE_RUNNING) return "<a href='act:ststop' class='stbtn stop'>停止测速</a>";
+    if (speedtest_loop_mode()) return "<a href='act:ststart' class='stbtn loop'>开始循环测速</a>";
     return "<a href='act:ststart' class='stbtn'>开始测速</a>";
 }
 
@@ -1294,6 +1510,8 @@ static const char *speedtest_dial_html(void)
         snprintf(sub, sizeof sub, "安装测速器后可用");
     } else if (g_st_state == ST_STATE_FAIL) {
         snprintf(sub, sizeof sub, "%s", g_st_err[0] ? g_st_err : "测速失败");
+    } else if (speedtest_loop_mode()) {
+        snprintf(sub, sizeof sub, "循环模式 / 手动停止");
     } else {
         snprintf(sub, sizeof sub, "准备就绪 / %d秒", g_st_dur);
     }
@@ -1335,6 +1553,7 @@ static const char *speedtest_home_inline_html(void)
              "<div class='st-caption'>测速源</div>%s"
              "<div class='st-caption'>方向</div>%s"
              "<div class='st-caption'>时长</div>%s"
+             "%s"
              "</div>"
              "<div class='st-actionbar'>%s</div>"
              "</div>",
@@ -1343,6 +1562,7 @@ static const char *speedtest_home_inline_html(void)
              speedtest_src_html(),
              speedtest_dir_html(),
              speedtest_dur_html(),
+             speedtest_loop_hint_html(),
              speedtest_action_html());
     return buf;
 }
@@ -1352,9 +1572,13 @@ static const char *speedtest_status_html(void)
     const char *cls = "idle";
     if (g_st_state == ST_STATE_RUNNING) {
         cls = "run";
-        if (!strcmp(g_st_phase, "download") || !strcmp(g_st_phase, "upload"))
+        if (speedtest_loop_mode() && g_st_have_result)
+            snprintf(raw, sizeof raw, "循环测速中 / 手动停止");
+        else if (!strcmp(g_st_phase, "download") || !strcmp(g_st_phase, "upload"))
             snprintf(raw, sizeof raw, "%s %.1f Mbps / 峰值 %.1f",
                      speedtest_phase_label(g_st_phase), g_st_cur_mbps, g_st_cur_peak);
+        else if (speedtest_loop_mode())
+            snprintf(raw, sizeof raw, "循环测速中 / 手动停止");
         else if (g_st_phase[0]) snprintf(raw, sizeof raw, "%s", speedtest_phase_label(g_st_phase));
         else if (g_st_msg[0]) snprintf(raw, sizeof raw, "测速中");
         else snprintf(raw, sizeof raw, "测速中");
@@ -1405,9 +1629,23 @@ static const char *speedtest_result_html(void)
         snprintf(buf, sizeof buf, "<div class='stempty bad'>%s</div>", err);
         return buf;
     }
+    if (g_st_state == ST_STATE_RUNNING && speedtest_loop_mode()) return "<div class='stempty'>循环测速中，手动停止前不会自动结束。</div>";
     if (g_st_state == ST_STATE_RUNNING) return "<div class='stempty'>测速进行中，结果稍后显示。</div>";
     if (g_st_state == ST_STATE_MISSING) return "<div class='stempty'>安装测速器后显示结果。</div>";
     return "<div class='stempty'>暂无测速结果。</div>";
+}
+
+static const char *speedtest_log_card_html(void)
+{
+    static char buf[2200];
+    snprintf(buf, sizeof buf,
+             "<div class='st-card st-log'>"
+             "<div class='st-caption'>测速日志</div>"
+             "%s%s"
+             "</div>",
+             speedtest_status_html(),
+             speedtest_result_html());
+    return buf;
 }
 
 static int hsr_freq_is_whitelist(long arfcn)
@@ -1437,6 +1675,7 @@ static int hsr_freq_hint(int mcc, const char *arfcn)
 }
 
 #define SIGNAL_MAX_CARRIERS 16
+#define SIGNAL_MAX_NEIGHBORS 16
 
 struct signal_carrier_metric {
     int valid;
@@ -1463,6 +1702,15 @@ struct signal_carrier_metric {
     char ml1_sinr[16];
 };
 
+struct signal_neighbor_metric {
+    int valid;
+    char pci[16];
+    char band[24];
+    char arfcn[32];
+    char rsrp[16];
+    char rsrq[16];
+};
+
 static void signal_carrier_metric_reset(struct signal_carrier_metric *c)
 {
     if (!c) return;
@@ -1487,6 +1735,17 @@ static void signal_carrier_metric_reset(struct signal_carrier_metric *c)
     snprintf(c->ml1_rsrp, sizeof c->ml1_rsrp, "-");
     snprintf(c->ml1_rsrq, sizeof c->ml1_rsrq, "-");
     snprintf(c->ml1_sinr, sizeof c->ml1_sinr, "-");
+}
+
+static void signal_neighbor_metric_reset(struct signal_neighbor_metric *n)
+{
+    if (!n) return;
+    memset(n, 0, sizeof *n);
+    snprintf(n->pci, sizeof n->pci, "-");
+    snprintf(n->band, sizeof n->band, "-");
+    snprintf(n->arfcn, sizeof n->arfcn, "-");
+    snprintf(n->rsrp, sizeof n->rsrp, "-");
+    snprintf(n->rsrq, sizeof n->rsrq, "-");
 }
 
 static const char *signal_carrier_val(const char *v)
@@ -2198,8 +2457,12 @@ struct signal_bundle {
     char nr_vendor[64];
     int lte_carrier_n;
     int nr_carrier_n;
+    int lte_neighbor_n;
+    int nr_neighbor_n;
     struct signal_carrier_metric lte_carriers[SIGNAL_MAX_CARRIERS];
     struct signal_carrier_metric nr_carriers[SIGNAL_MAX_CARRIERS];
+    struct signal_neighbor_metric lte_neighbors[SIGNAL_MAX_NEIGHBORS];
+    struct signal_neighbor_metric nr_neighbors[SIGNAL_MAX_NEIGHBORS];
 };
 
 static void signal_bundle_reset(struct signal_bundle *b)
@@ -2237,9 +2500,15 @@ static void signal_bundle_reset(struct signal_bundle *b)
     snprintf(b->nr_vendor, sizeof b->nr_vendor, "-");
     b->lte_carrier_n = 0;
     b->nr_carrier_n = 0;
+    b->lte_neighbor_n = 0;
+    b->nr_neighbor_n = 0;
     for (int i = 0; i < SIGNAL_MAX_CARRIERS; i++) {
         signal_carrier_metric_reset(&b->lte_carriers[i]);
         signal_carrier_metric_reset(&b->nr_carriers[i]);
+    }
+    for (int i = 0; i < SIGNAL_MAX_NEIGHBORS; i++) {
+        signal_neighbor_metric_reset(&b->lte_neighbors[i]);
+        signal_neighbor_metric_reset(&b->nr_neighbors[i]);
     }
 }
 
@@ -2383,6 +2652,99 @@ static int signal_parse_carriers(const char *parent, int is_nr,
     return n;
 }
 
+static void signal_lte_band_from_earfcn(const char *earfcn, char *dst, size_t cap)
+{
+    struct range { long lo, hi; const char *band; };
+    static const struct range ranges[] = {
+        { 0, 599, "B1" }, { 600, 1199, "B2" }, { 1200, 1949, "B3" },
+        { 1950, 2399, "B4" }, { 2400, 2649, "B5" }, { 2750, 3449, "B7" },
+        { 3450, 3799, "B8" }, { 5010, 5179, "B12" }, { 5180, 5279, "B13" },
+        { 5730, 5849, "B17" }, { 5850, 5999, "B18" }, { 6000, 6149, "B19" },
+        { 6150, 6449, "B20" }, { 8690, 9039, "B26" }, { 9210, 9659, "B28" },
+        { 36200, 36349, "B34" }, { 37750, 38249, "B38" },
+        { 38250, 38649, "B39" }, { 38650, 39649, "B40" },
+        { 39650, 41589, "B41" },
+    };
+    char *end = NULL;
+    long v;
+
+    if (!dst || cap == 0) return;
+    if (!signal_value_present(earfcn)) { snprintf(dst, cap, "-"); return; }
+    v = strtol(earfcn, &end, 10);
+    if (end == earfcn || v <= 0) { snprintf(dst, cap, "-"); return; }
+    for (size_t i = 0; i < sizeof(ranges) / sizeof(ranges[0]); i++)
+        if (v >= ranges[i].lo && v <= ranges[i].hi) {
+            snprintf(dst, cap, "%s", ranges[i].band);
+            return;
+        }
+    snprintf(dst, cap, "E%.20s", earfcn);
+}
+
+static void signal_nr_band_from_nrarfcn(const char *nrarfcn, char *dst, size_t cap)
+{
+    struct range { long lo, hi; const char *band; };
+    static const struct range ranges[] = {
+        { 151600, 160600, "n28" }, { 173800, 178800, "n5" },
+        { 185000, 192000, "n8" }, { 361000, 376000, "n3" },
+        { 422000, 434000, "n1" }, { 460000, 480000, "n40" },
+        { 499200, 537999, "n41" }, { 514000, 524000, "n38" },
+        { 620000, 653333, "n78" }, { 653334, 680000, "n77" },
+        { 636667, 646666, "n48" }, { 693334, 733333, "n79" },
+    };
+    char *end = NULL;
+    long v;
+
+    if (!dst || cap == 0) return;
+    if (!signal_value_present(nrarfcn)) { snprintf(dst, cap, "-"); return; }
+    v = strtol(nrarfcn, &end, 10);
+    if (end == nrarfcn || v <= 0) { snprintf(dst, cap, "-"); return; }
+    for (size_t i = 0; i < sizeof(ranges) / sizeof(ranges[0]); i++)
+        if (v >= ranges[i].lo && v <= ranges[i].hi) {
+            snprintf(dst, cap, "%s", ranges[i].band);
+            return;
+        }
+    snprintf(dst, cap, "N%.20s", nrarfcn);
+}
+
+static int signal_parse_neighbors(const char *parent, int is_nr,
+                                  struct signal_neighbor_metric *out, int max)
+{
+    char arr[8192];
+    char obj[1024];
+    const char *p;
+    int n = 0;
+
+    if (!parent || !out || max <= 0)
+        return 0;
+    if (!json_get(parent, "neighbors", arr, sizeof arr))
+        return 0;
+    p = arr;
+    while (n < max && signal_json_next_object(&p, obj, sizeof obj)) {
+        struct signal_neighbor_metric *m = &out[n];
+        signal_neighbor_metric_reset(m);
+        signal_carrier_metric_get(obj, "pci", m->pci, sizeof m->pci);
+        signal_carrier_metric_get(obj, "band", m->band, sizeof m->band);
+        signal_carrier_metric_get(obj, is_nr ? "nrarfcn" : "earfcn", m->arfcn, sizeof m->arfcn);
+        if (!signal_value_present(m->arfcn))
+            signal_carrier_metric_get(obj, "arfcn", m->arfcn, sizeof m->arfcn);
+        signal_carrier_metric_get(obj, "rsrp", m->rsrp, sizeof m->rsrp);
+        signal_carrier_metric_get(obj, "rsrq", m->rsrq, sizeof m->rsrq);
+        if (!signal_value_present(m->band)) {
+            if (is_nr)
+                signal_nr_band_from_nrarfcn(m->arfcn, m->band, sizeof m->band);
+            else
+                signal_lte_band_from_earfcn(m->arfcn, m->band, sizeof m->band);
+        }
+        if (signal_value_present(m->pci) ||
+            signal_value_present(m->rsrp) ||
+            signal_value_present(m->rsrq)) {
+            m->valid = 1;
+            n++;
+        }
+    }
+    return n;
+}
+
 static int signal_carrier_is_pcell(const struct signal_carrier_metric *m)
 {
     if (!m || !m->valid)
@@ -2468,6 +2830,8 @@ static void signal_bundle_apply_metrics(struct signal_bundle *b)
         signal_metric_get(lte, "pucch", b->lte_pucch, sizeof b->lte_pucch);
         b->lte_carrier_n = signal_parse_carriers(lte, 0, b->lte_carriers,
                                                  SIGNAL_MAX_CARRIERS);
+        b->lte_neighbor_n = signal_parse_neighbors(lte, 0, b->lte_neighbors,
+                                                   SIGNAL_MAX_NEIGHBORS);
     }
     if (json_get(json, "nr", nr, sizeof nr)) {
         signal_metric_get(nr, "ta", b->nr_ta, sizeof b->nr_ta);
@@ -2487,6 +2851,8 @@ static void signal_bundle_apply_metrics(struct signal_bundle *b)
         signal_metric_get(nr, "serving_ssb", b->nr_serving_ssb, sizeof b->nr_serving_ssb);
         b->nr_carrier_n = signal_parse_carriers(nr, 1, b->nr_carriers,
                                                 SIGNAL_MAX_CARRIERS);
+        b->nr_neighbor_n = signal_parse_neighbors(nr, 1, b->nr_neighbors,
+                                                  SIGNAL_MAX_NEIGHBORS);
     }
     if (!signal_value_present(b->ta)) {
         if (signal_value_present(b->nr_ta))
@@ -3352,6 +3718,116 @@ static void fmt_ta_distance(char *dst, size_t cap, int ta, double unit_m)
     if (meters >= 1000.0) snprintf(dst, cap, "约 %.1f km", meters / 1000.0);
     else                  snprintf(dst, cap, "约 %.0f m", meters);
 }
+
+static int signal_neighbor_count(const struct signal_neighbor_metric *list, int n)
+{
+    int count = 0;
+
+    if (!list || n <= 0) return 0;
+    for (int i = 0; i < n; i++)
+        if (list[i].valid)
+            count++;
+    return count;
+}
+
+static const char *signal_rsrp_class(const char *rsrp)
+{
+    double v;
+
+    if (!signal_value_present(rsrp)) return "q-off";
+    v = atof(rsrp);
+    if (v >= -85.0) return "q-good";
+    if (v >= -105.0) return "q-mid";
+    return "q-bad";
+}
+
+static const char *signal_rsrq_class(const char *rsrq)
+{
+    double v;
+
+    if (!signal_value_present(rsrq)) return "q-off";
+    v = atof(rsrq);
+    if (v >= -10.0) return "q-good";
+    if (v >= -15.0) return "q-mid";
+    return "q-bad";
+}
+
+static int signal_neighbor_row(char *buf, int o, int cap,
+                               const struct signal_neighbor_metric *n)
+{
+    char pci[32], band[48], rsrp[32], rsrq[32];
+
+    if (!buf || cap <= 0 || o >= cap || !n || !n->valid)
+        return o;
+    html_esc(pci, sizeof pci, signal_carrier_val(n->pci));
+    html_esc(band, sizeof band, signal_carrier_val(n->band));
+    html_esc(rsrp, sizeof rsrp, signal_carrier_val(n->rsrp));
+    html_esc(rsrq, sizeof rsrq, signal_carrier_val(n->rsrq));
+    return o + snprintf(buf + o, cap - o,
+                        "<div class='nrow'><span>%s</span><span>%s</span>"
+                        "<span class='%s'>%s</span><span class='%s'>%s</span></div>",
+                        pci, band, signal_rsrp_class(n->rsrp), rsrp,
+                        signal_rsrq_class(n->rsrq), rsrq);
+}
+
+static int signal_neighbor_section(char *buf, int o, int cap, const char *title,
+                                   const struct signal_neighbor_metric *list, int n)
+{
+    int count = signal_neighbor_count(list, n);
+
+    if (!count || !buf || cap <= 0 || o >= cap)
+        return o;
+    o += snprintf(buf + o, cap - o,
+                  "<div class='nsec'>%s <span>%d</span></div>"
+                  "<div class='nhead'><span>PCI</span><span>频段</span><span>RSRP</span><span>RSRQ</span></div>",
+                  title, count);
+    for (int i = 0; i < n; i++)
+        o = signal_neighbor_row(buf, o, cap, &list[i]);
+    return o;
+}
+
+static const char *signal_neighbors_html(const struct signal_bundle *sig)
+{
+    static char buf[7000];
+    int nr_count = sig ? signal_neighbor_count(sig->nr_neighbors, sig->nr_neighbor_n) : 0;
+    int lte_count = sig ? signal_neighbor_count(sig->lte_neighbors, sig->lte_neighbor_n) : 0;
+    int total = nr_count + lte_count;
+    int o = 0;
+
+    if (!signal_live_enabled()) {
+        buf[0] = '\0';
+        return buf;
+    }
+
+    if (!g_neighbor_open) {
+        snprintf(buf, sizeof buf,
+                 "<a href='act:neighbors' class='card neigh-toggle'>"
+                 "<span class='title'>邻小区</span><span class='r muted'>%d 个 · 点击展开</span>"
+                 "</a>",
+                 total);
+        return buf;
+    }
+
+    o += snprintf(buf + o, sizeof buf - o,
+                  "<div class='card neigh-card'>"
+                  "<div class='title'>邻小区 <a href='act:neighbors' class='rev r'>收起</a></div>");
+    if (!signal_live_enabled()) {
+        o += snprintf(buf + o, sizeof buf - o,
+                      "<div class='sec'>信令解析已关闭，开启后显示 LTE / NR 邻区。</div>");
+    } else if (total <= 0) {
+        o += snprintf(buf + o, sizeof buf - o,
+                      "<div class='sec'>等待 LTE / NR ML1 邻区测量。</div>"
+                      "<a href='act:sigrescan' class='neigh-rescan'>刷新邻区</a>");
+    } else {
+        o = signal_neighbor_section(buf, o, sizeof buf, "NR", sig->nr_neighbors, sig->nr_neighbor_n);
+        o = signal_neighbor_section(buf, o, sizeof buf, "LTE", sig->lte_neighbors, sig->lte_neighbor_n);
+        o += snprintf(buf + o, sizeof buf - o,
+                      "<a href='act:sigrescan' class='neigh-rescan'>刷新邻区</a>");
+    }
+    snprintf(buf + o, sizeof buf - o, "</div>");
+    return buf;
+}
+
 /* Fill a kv table from the current device state. Buffers are static. */
 static int build_kv(struct kv *t, const char *path)
 {
@@ -3365,7 +3841,7 @@ static int build_kv(struct kv *t, const char *path)
     static char s_rxb[16], s_txb[16], s_cpu[8], s_mem[8], w_rsrp[6], w_rsrq[6], w_sinr[6], w_bw[6];
     static char s_oper[48], s_ssid[64], s_key[64], s_page[8], s_np[8], s_model[64], s_fw[80];
     static char s_qci[8], s_ambr[24], s_sbar[640], s_dots[320], s_ta[16], s_tadist[24];
-    static char s_nrports[64], s_nrbeam[128], s_nrvendor[64], s_sigadvstate[64], s_sigrefresh[16], s_signalcards[10000];
+    static char s_nrports[64], s_nrbeam[128], s_nrvendor[64], s_sigadvstate[64], s_sigrefresh[16], s_signalcards[10000], s_neighborcards[7000];
     static char s_last_lte_nas[128] = "-";
         static char s_last_nr_nas[128] = "-";
         static char s_last_nrports[64] = "-";
@@ -3465,6 +3941,8 @@ static int build_kv(struct kv *t, const char *path)
                 signal_async_publish(&sig, 1);
         }
     }
+    snprintf(s_neighborcards, sizeof s_neighborcards, "%s",
+             is_signalhome ? signal_neighbors_html(&sig) : "");
 
     if (is_cellinfo) {
         char c_lte_rrc[96], c_lte_nas[96], c_nr_rrc[96], c_nr_nas[96];
@@ -4140,6 +4618,7 @@ static int build_kv(struct kv *t, const char *path)
     t[i++] = (struct kv){ "PAGE", s_page };        t[i++] = (struct kv){ "NPAGES", s_np };
     t[i++] = (struct kv){ "CARRIERS", s_carriers }; t[i++] = (struct kv){ "GEN", s_gen };
     t[i++] = (struct kv){ "SIGNALCARDS", s_sigcards };
+    t[i++] = (struct kv){ "NEIGHBORCARDS", s_neighborcards };
     t[i++] = (struct kv){ "GENCLASS", genc };
     t[i++] = (struct kv){ "THEME", g_theme ? "light" : "dark" };
     t[i++] = (struct kv){ "BATCLASS", d.bat_percent <= 20 ? "low" : "" };
@@ -4166,14 +4645,18 @@ static int build_kv(struct kv *t, const char *path)
     t[i++] = (struct kv){ "STSRCSEG", speedtest_src_html() };
     t[i++] = (struct kv){ "STDIRSEG", speedtest_dir_html() };
     t[i++] = (struct kv){ "STDURSEG", speedtest_dur_html() };
+    t[i++] = (struct kv){ "STLOOPHINT", speedtest_loop_hint_html() };
     t[i++] = (struct kv){ "STSTATUS", speedtest_status_html() };
     t[i++] = (struct kv){ "STRESULT", speedtest_result_html() };
+    t[i++] = (struct kv){ "STLOGCARD", speedtest_log_card_html() };
     t[i++] = (struct kv){ "STACTION", speedtest_action_html() };
     t[i++] = (struct kv){ "STINSTALL", speedtest_install_html() };
     t[i++] = (struct kv){ "STGAUGE", speedtest_dial_html() };
     t[i++] = (struct kv){ "STCHART", speedtest_lines_html() };
     t[i++] = (struct kv){ "STHOMEBTN", speedtest_home_button_html() };
     t[i++] = (struct kv){ "STHOMEINLINE", speedtest_home_inline_html() };
+    t[i++] = (struct kv){ "STFUNCTIONTILE", speedtest_function_tile_html() };
+    t[i++] = (struct kv){ "CUSTOMFUNCTIONTILES", custom_function_tiles_html() };
     t[i++] = (struct kv){ "SIGADVSTATE", s_sigadvstate };
     t[i++] = (struct kv){ "MEMDETAIL", s_memdet }; t[i++] = (struct kv){ "UPSHORT", s_upshort };
     t[i++] = (struct kv){ "CHGV", s_chgv };       t[i++] = (struct kv){ "CHGI", s_chgi };
@@ -4240,9 +4723,84 @@ static void refresh_status_cache(void)
     (void)build_kv(t, NULL);
 }
 
+static const char *kv_get(struct kv *t, int n, const char *key)
+{
+    for (int i = 0; i < n; i++)
+        if (!strcmp(t[i].k, key)) return t[i].v ? t[i].v : "";
+    return "";
+}
+
+static const char *custom_page_html(const char *path)
+{
+    static char out[PAGE_HTML_CACHE_CAP];
+    const char *tmpl = read_template_cached(path);
+    const char *start, *end, *body, *gt;
+    char *body_src;
+    size_t len;
+    struct kv t[192];
+    int n;
+    char raw_title[96], title[160];
+    const char *base;
+    char *filled;
+    int o;
+
+    if (!tmpl) return NULL;
+    start = tmpl;
+    end = tmpl + strlen(tmpl);
+    body = strcasestr(tmpl, "<body");
+    if (body) {
+        gt = strchr(body, '>');
+        if (gt) {
+            start = gt + 1;
+            end = strcasestr(start, "</body>");
+            if (!end) end = tmpl + strlen(tmpl);
+        }
+    }
+    len = (size_t)(end - start);
+    body_src = malloc(len + 1);
+    if (!body_src) return NULL;
+    memcpy(body_src, start, len);
+    body_src[len] = 0;
+
+    n = build_kv(t, path);
+    filled = apply_template(body_src, t, n);
+    free(body_src);
+
+    base = strrchr(path, '/');
+    base = base ? base + 1 : path;
+    if (!function_title_from_html(tmpl, raw_title, sizeof raw_title))
+        function_label_from_name(raw_title, sizeof raw_title, base);
+    html_esc(title, sizeof title, raw_title);
+
+    o = snprintf(out, sizeof out,
+                 "<!DOCTYPE html><html lang=\"zh-CN\">"
+                 "<head><meta charset=\"UTF-8\"><link rel=\"stylesheet\" href=\"style.css\"></head>"
+                 "<body class=\"%s\">"
+                 "%s"
+                 "<div class=\"subtop\"><a href=\"act:backfunc\" class=\"subback\">返回</a>"
+                 "<span class=\"subname\">%s</span></div>"
+                 "<div class=\"custom-page\">",
+                 g_theme ? "light" : "dark", kv_get(t, n, "STATUSBAR"), title);
+    if (o < 0) o = 0;
+    if (o < (int)sizeof(out) - 1) {
+        size_t room = sizeof(out) - (size_t)o - 1;
+        size_t fl = strlen(filled);
+        if (fl > room) fl = room;
+        memcpy(out + o, filled, fl);
+        o += (int)fl;
+        out[o] = 0;
+    }
+    if (o < (int)sizeof(out) - 1)
+        snprintf(out + o, sizeof(out) - (size_t)o,
+                 "</div>%s<div class=\"pgpad\"></div></body></html>",
+                 kv_get(t, n, "TOAST"));
+    return out;
+}
+
 /* Build the data-filled HTML for a page (returns a static buffer). */
 static const char *page_html(const char *path)
 {
+    if (path_is_function_page(path)) return custom_page_html(path);
     const char *tmpl = read_template_cached(path);   /* cache templates with mtime invalidation */
     if (!tmpl) return NULL;
     struct kv t[192];
@@ -4548,8 +5106,20 @@ static uint16_t g_bufA[320 * 480], g_bufB[320 * 480];
 #define EXT_BACK_EDGE_PX 24
 #define EXT_BACK_COMMIT_PX 56
 #define EXT_BACK_MAX_DY 44
+#define TOUCH_FRAME_MIN_MS 16
+#define QUEUED_SWIPE_PX 52
+#define QUEUED_SCROLL_PX 28
 #define IDLE_SLEEP_ON_US 8000
 #define IDLE_SLEEP_OFF_US 30000
+
+static int motion_frame_due(uint32_t now, uint32_t *last)
+{
+    if (*last == 0 || now - *last >= TOUCH_FRAME_MIN_MS) {
+        *last = now;
+        return 1;
+    }
+    return 0;
+}
 
 static inline uint16_t *copy_rev_span(uint16_t *dp, const uint16_t *src, int n)
 {
@@ -4617,7 +5187,7 @@ static void prep_pair(int target, int dir)
 /* Settle the offset from o0 to o1 over a few frames. */
 static void anim_o(drm_disp_t *d, int o0, int o1)
 {
-    const int FR = 5;
+    const int FR = 3;
     for (int f = 1; f <= FR; f++) compose_frame(d, o0 + (o1 - o0) * f / FR);
 }
 
@@ -4640,7 +5210,7 @@ static void scroll_blit(drm_disp_t *d, int scroll)
     }
     html_view_set_scroll(scroll);
     draw_charts();
-    if (!g_lock_state && (path_is_speedtest(g_pages[g_cur]) || g_st_home_open)) draw_speedtest_widgets();
+    if (!g_lock_state && (path_is_speedtest(active_page_path()) || g_st_home_open)) draw_speedtest_widgets();
     /* The native status bar is pinned; dragging only changes the content below it.
      * With the framebuffer rotated 180 degrees, that content maps to the top
      * framebuffer rows, so the dirty rectangle intentionally excludes the tail. */
@@ -4748,6 +5318,7 @@ int main(void)
     int scroll_track_pos = 0;
     uint32_t drag_down_ms = 0;
     uint32_t scroll_track_ms = 0;
+    uint32_t last_motion_frame = 0;
     float scroll_v = 0.0f, scroll_pos = 0.0f;
     int sliding = 0, bar_x = 0, bar_w = 0;   /* brightness slider drag */
     int segging = 0, seg_x = 0, seg_y = 0, seg_w = 0, seg_h = 0;   /* segmented control drag */
@@ -4767,13 +5338,14 @@ int main(void)
 
     /* lock pad takes priority over the power menu and the normal pages */
     /* lock states: 1=preview (page 1), 2=setup pad, 3=unlock pad */
-    #define CUR_PATH (g_lock_state == 1 ? g_pages[0] : g_lock_state ? lock_path : menu ? menu_path : g_pages[g_cur])
+    #define CUR_PATH (g_lock_state == 1 ? g_pages[0] : g_lock_state ? lock_path : menu ? menu_path : active_page_path())
 
     load_conf();                          /* restore persisted UI settings */
+    mkdir(FUNCTIONS_DIR, 0755);
     speedtest_apply_saved_prefs();
     speedtest_poll(millis());
     if (!g_charge_boot) rescan_pages_keep_current();
-    g_pages_dir_mtime = file_mtime_ns(UI_DIR);
+    g_pages_dir_mtime = ui_scan_mtime_ns();
     g_pages_scan_at = millis();
     (void)datad_set_refresh_ms(g_refresh_ms);
     (void)datad_set_signal_read(g_sig_read);
@@ -4810,7 +5382,7 @@ int main(void)
             if (ext_changed) {
                 dragging = 0; drag_dir = 0; scroll_dir = 0; sliding = 0; segging = 0;
                 scroll_inertia = 0; scroll_track_valid = 0; scroll_v = 0.0f;
-                menu = 0; g_modal = 0; g_sms_open = -1;
+                menu = 0; g_modal = 0; g_sms_open = -1; subpage_close();
                 touch_input_clear_taps(&touch);
                 if (devui_ext_active(&ext)) {
                     refresh_status_cache();
@@ -4873,6 +5445,7 @@ int main(void)
 
         /* touch: follow-finger swipe (pages) / drag (scroll) + tap actions */
         int x, y, pressed;
+        int replay_release = 0;
         touch_input_read(&touch, &x, &y, &pressed);
 
         int on_now = backlight_is_on();
@@ -5050,21 +5623,95 @@ int main(void)
                     int ns = (int)(scroll_pos + (scroll_pos >= 0.0f ? 0.5f : -0.5f));
                     if (ns < 0) { ns = 0; scroll_pos = 0.0f; scroll_v = 0.0f; }
                     if (ns > maxs) { ns = maxs; scroll_pos = (float)maxs; scroll_v = 0.0f; }
-                    if (ns != g_scroll) { g_scroll = ns; scroll_blit(&disp, g_scroll); }
+                    if (ns != g_scroll) {
+                        g_scroll = ns;
+                        if (motion_frame_due(now, &last_motion_frame)) {
+                            scroll_blit(&disp, g_scroll);
+                            animating = 1;
+                        }
+                    }
                     if (scroll_v == 0.0f || ns == 0 || ns == maxs) scroll_inertia = 0;
                     scroll_track_ms = now;
-                    animating = 1;
+                }
+            }
+            if (!pressed && !prev_press && !dragging && !menu) {
+                int sx, sy, ex, ey, queued_motion = 0;
+                if (touch_input_take_latest_stroke(&touch, &sx, &sy, &ex, &ey)) {
+                    int qdx = ex - sx, qdy = ey - sy;
+                    int qadx = qdx < 0 ? -qdx : qdx;
+                    int qady = qdy < 0 ? -qdy : qdy;
+                    if (!g_subpage[0] && g_npages > 1 && qadx >= QUEUED_SWIPE_PX && qadx > qady) {
+                        int dir = qdx < 0 ? 1 : -1;
+                        int target = (g_cur + (dir > 0 ? 1 : g_npages - 1)) % g_npages;
+                        int o_now = dir > 0 ? -qdx : (W - qdx);
+                        if (o_now < 0) o_now = 0;
+                        if (o_now > W) o_now = W;
+                        scroll_inertia = 0;
+                        scroll_track_valid = 0;
+                        scroll_v = 0.0f;
+                        prep_pair(target, dir);
+                        anim_o(&disp, o_now, dir > 0 ? W : 0);
+                        g_cur = target;
+                        g_scroll = 0;
+                        invalidate_render_html_cache();
+                        need_render = 1;
+                        animating = 1;
+                        last_motion_frame = now;
+                        queued_motion = 1;
+                        touch_input_clear_taps(&touch);
+                    } else if (qady >= QUEUED_SCROLL_PX && qady >= qadx && maxs > 0) {
+                        int bufh = g_page_h > SCROLLMAX ? SCROLLMAX : g_page_h;
+                        const char *hp = page_html(CUR_PATH);
+                        int rh = hp ? html_view_render_tall(g_scrollbuf, hp, bufh) : g_page_h;
+                        int ns;
+                        g_scroll_h = rh > bufh ? bufh : rh;
+                        maxs = g_scroll_h > H ? g_scroll_h - H : 0;
+                        ns = g_scroll - qdy;
+                        if (ns < 0) ns = 0;
+                        if (ns > maxs) ns = maxs;
+                        scroll_inertia = 0;
+                        scroll_track_valid = 0;
+                        scroll_v = 0.0f;
+                        if (ns != g_scroll) {
+                            g_scroll = ns;
+                            scroll_pos = (float)g_scroll;
+                            scroll_blit(&disp, g_scroll);
+                            animating = 1;
+                            last_motion_frame = now;
+                        }
+                        queued_motion = 1;
+                        touch_input_clear_taps(&touch);
+                    }
+                }
+                if (!queued_motion) {
+                    int tx, ty;
+                    if (touch_input_take_latest_tap(&touch, &tx, &ty)) {
+                        x = tx; y = ty;
+                        down_x = tx; down_y = ty;
+                        dragging = 1; drag_dir = 0; scroll_dir = 0; scroll_start = g_scroll; sliding = 0; segging = 0;
+                        drag_down_ms = now;
+                        scroll_inertia = 0;
+                        scroll_track_valid = 0;
+                        scroll_v = 0.0f;
+                        last_motion_frame = 0;
+                        replay_release = 1;
+                        prev_press = 1;  /* reuse the normal release/action path below */
+                    }
                 }
             }
             if (pressed && !prev_press) {
                 down_x = x; down_y = y; dragging = 1; drag_dir = 0; scroll_dir = 0; scroll_start = g_scroll; sliding = 0; segging = 0;
+                last_motion_frame = 0;
                 drag_down_ms = now;
                 scroll_track_valid = 0; scroll_v = 0.0f;
                 int bx, by, bw, bh;   /* grab the brightness slider / segmented control if pressed on it */
                 if (html_view_rect("#bright-bar", &bx, &by, &bw, &bh) &&
                     x >= bx && x < bx + bw && y >= by - 5 && y < by + bh + 5) {
                     sliding = 1; bar_x = bx; bar_w = bw;
-                    set_bright_x(x, bx, bw); render(&disp, CUR_PATH); animating = 1;
+                    set_bright_x(x, bx, bw);
+                    render(&disp, CUR_PATH);
+                    last_motion_frame = now;
+                    animating = 1;
                 } else {   /* segmented controls: net mode / auto-off / refresh */
                     int which = 0, n = 4;
                     if (html_view_rect("#netseg", &bx, &by, &bw, &bh) &&
@@ -5080,18 +5727,30 @@ int main(void)
                         render(&disp, CUR_PATH);          /* plain seg (no cell highlight) */
                         capture_fb(&disp);
                         seg_box(&disp, seg_x, seg_y, seg_w, seg_h, seg_n, x);
+                        last_motion_frame = now;
                         animating = 1;
                     }
                 }
             }
             else if (pressed && dragging && !menu) {
-                if (sliding) { set_bright_x(x, bar_x, bar_w); render(&disp, CUR_PATH); animating = 1; }
-                else if (segging) { seg_box(&disp, seg_x, seg_y, seg_w, seg_h, seg_n, x); animating = 1; }
+                if (sliding) {
+                    set_bright_x(x, bar_x, bar_w);
+                    if (motion_frame_due(now, &last_motion_frame)) {
+                        render(&disp, CUR_PATH);
+                        animating = 1;
+                    }
+                }
+                else if (segging) {
+                    if (motion_frame_due(now, &last_motion_frame)) {
+                        seg_box(&disp, seg_x, seg_y, seg_w, seg_h, seg_n, x);
+                        animating = 1;
+                    }
+                }
                 else {
                 int dx = x - down_x, dy = y - down_y;
                 int adx = dx < 0 ? -dx : dx, ady = dy < 0 ? -dy : dy;
                 if (drag_dir == 0 && scroll_dir == 0) {
-                    if (g_npages > 1 && adx > DRAG_START_PX && adx > ady) {
+                    if (!g_subpage[0] && g_npages > 1 && adx > DRAG_START_PX && adx > ady) {
                         drag_dir = dx < 0 ? 1 : -1;
                         drag_target = (g_cur + (drag_dir > 0 ? 1 : g_npages - 1)) % g_npages;
                         prep_pair(drag_target, drag_dir);
@@ -5109,11 +5768,14 @@ int main(void)
                     } else if (ady > DRAG_CANCEL_PX) dragging = 0;
                 }
                 if (drag_dir != 0) {
-                    compose_frame(&disp, drag_dir > 0 ? -dx : (W - dx));
-                    animating = 1;
+                    if (motion_frame_due(now, &last_motion_frame)) {
+                        compose_frame(&disp, drag_dir > 0 ? -dx : (W - dx));
+                        animating = 1;
+                    }
                 } else if (scroll_dir != 0) {
                     int ns = scroll_start - dy;
-                    if (ns < 0) ns = 0; if (ns > maxs) ns = maxs;
+                    if (ns < 0) ns = 0;
+                    if (ns > maxs) ns = maxs;
                     if (ns != g_scroll) {
                         if (scroll_track_ms && now > scroll_track_ms) {
                             float inst = (ns - scroll_track_pos) * 1000.0f / (float)(now - scroll_track_ms);
@@ -5125,14 +5787,20 @@ int main(void)
                         scroll_pos = (float)g_scroll;
                         scroll_track_pos = g_scroll;
                         scroll_track_ms = now;
-                        scroll_blit(&disp, g_scroll);
+                        if (motion_frame_due(now, &last_motion_frame)) {
+                            scroll_blit(&disp, g_scroll);
+                            animating = 1;
+                        }
                     }
-                    animating = 1;
                 }
                 }
             }
             else if (!pressed && prev_press) {
-                int dx = x - down_x;
+                int rel_dx = x - down_x, rel_dy = y - down_y;
+                int release_was_tap = dragging && !sliding && !segging &&
+                                      drag_dir == 0 && scroll_dir == 0 &&
+                                      rel_dx * rel_dx + rel_dy * rel_dy <= 14 * 14;
+                int dx = rel_dx;
                 if (sliding) { save_conf(); /* persist brightness after drag */ }
                 else if (segging) {   /* snap to nearest cell + apply */
                     int c = clampi((x - seg_x) * seg_n / (seg_w > 0 ? seg_w : 1), 0, seg_n - 1);
@@ -5200,6 +5868,41 @@ int main(void)
                         }
                         else if (!strcmp(a, "close"))     { menu = 0; g_pwr_confirm = 0; need_render = 1; }
                         else if (!strcmp(a, "menu"))      { backlight_on(); menu = 1; g_pwr_confirm = 0; need_render = 1; }
+                        else if (!strncmp(a, "sub:", 4)) {
+                            if (subpage_open(a + 4)) {
+                                menu = 0;
+                                g_modal = 0;
+                                g_sms_open = -1;
+                                invalidate_render_html_cache();
+                            } else {
+                                snprintf(g_toast, sizeof g_toast, "页面不可用");
+                                g_toast_until = now + 1600;
+                            }
+                            last_act = now;
+                            need_render = 1;
+                        }
+                        else if (!strncmp(a, "func:", 5)) {
+                            if (function_page_open(a + 5)) {
+                                menu = 0;
+                                g_modal = 0;
+                                g_sms_open = -1;
+                                invalidate_render_html_cache();
+                            } else {
+                                snprintf(g_toast, sizeof g_toast, "页面不可用");
+                                g_toast_until = now + 1600;
+                            }
+                            last_act = now;
+                            need_render = 1;
+                        }
+                        else if (!strcmp(a, "backfunc")) {
+                            subpage_close();
+                            menu = 0;
+                            g_modal = 0;
+                            g_sms_open = -1;
+                            invalidate_render_html_cache();
+                            last_act = now;
+                            need_render = 1;
+                        }
                         else if (!strcmp(a, "theme"))     { g_theme = !g_theme; save_conf(); need_render = 1; }
                         else if (!strcmp(a, "revealkey")) { g_show_key = !g_show_key; need_render = 1; }
                         else if (!strcmp(a, "revealcell")) { g_show_cellid = !g_show_cellid; need_render = 1; }
@@ -5215,6 +5918,12 @@ int main(void)
                             snprintf(g_toast, sizeof g_toast, "已请求信令/邻区刷新，不会断网");
                             g_toast_until = now + 2200;
                             invalidate_render_html_cache();
+                            need_render = 1;
+                        }
+                        else if (!strcmp(a, "neighbors")) {
+                            g_neighbor_open = !g_neighbor_open;
+                            invalidate_render_html_cache();
+                            last_act = now;
                             need_render = 1;
                         }
                         else if (!strcmp(a, "spunit"))    { g_speed_bits = !g_speed_bits; save_conf(); need_render = 1; }
@@ -5384,11 +6093,19 @@ int main(void)
                             need_render = 1;
                         }
                         else if (!strcmp(a, "stpage")) {
-                            int pi = speedtest_page_index();
-                            if (pi >= 0) {
-                                g_cur = pi;
-                                g_scroll = 0;
+                            if (subpage_open("speedtest.html")) {
                                 menu = 0;
+                                g_modal = 0;
+                                g_sms_open = -1;
+                                g_st_home_open = 0;
+                            } else {
+                                int pi = speedtest_page_index();
+                                if (pi >= 0) {
+                                    subpage_close();
+                                    g_cur = pi;
+                                    g_scroll = 0;
+                                    menu = 0;
+                                }
                             }
                             last_act = now;
                             need_render = 1;
@@ -5398,6 +6115,7 @@ int main(void)
                                 g_st_home_open = !g_st_home_open;
                             else
                                 g_st_home_open = 0;
+                            subpage_close();
                             g_cur = 0;
                             g_scroll = 0;
                             menu = 0;
@@ -5405,8 +6123,9 @@ int main(void)
                             need_render = 1;
                         }
                         else if (!strcmp(a, "stclose")) {
-                            
-                            g_st_home_open = 0;g_cur = 0;
+                            g_st_home_open = 0;
+                            subpage_close();
+                            g_cur = 0;
                             g_scroll = 0;
                             menu = 0;
                             last_act = now;
@@ -5496,6 +6215,9 @@ int main(void)
                     }
                 }
 action_done:
+                if (!replay_release)
+                    touch_input_drop_replayed_release(&touch, release_was_tap);
+                last_motion_frame = 0;
                 dragging = 0; drag_dir = 0; scroll_dir = 0; sliding = 0; segging = 0; g_segdrag = 0;
                 scroll_track_valid = 0;
             }

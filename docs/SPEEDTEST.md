@@ -5,18 +5,20 @@ This document describes the optional `better-speedtest` integration in `u60pro-d
 ## Current model
 
 - DevUI does not bundle the `better-speedtest` binary.
-- DevUI does not install a standalone speedtest page by default.
-- If `/data/plugins/better-speedtest/better-speedtest` exists and is executable, the first page shows a `网络测速` toggle below the signal cards.
-- Tapping `网络测速` expands the speedtest panel inline on the first page. Tapping `收起测速` collapses it.
+- DevUI ships a second-level speedtest template at `ui/subpages/speedtest.html`.
+- If `/data/plugins/better-speedtest/better-speedtest` exists and is executable, the "更多功能" page shows a `网络测速` tile.
+- Tapping the tile opens the speedtest second-level page; it does not add another top-level swipe page.
 - Removing the speedtest backend hides the entry button automatically.
-- Locked preview mode reuses the first page but hides the speedtest toggle, inline panel, and native speedtest widgets.
-- The old optional `07-speedtest.html` standalone page has been removed. Do not ship or install it for the current inline UX.
+- Locked preview mode reuses the first page but hides speedtest controls and native speedtest widgets.
+- The old optional `07-speedtest.html` standalone swipe page has been removed. Do not ship or install it for the current UX.
 
 ## Runtime paths
 
 - Binary: `/data/plugins/better-speedtest/better-speedtest`
 - Log: `/tmp/better-speedtest.log`
 - DevUI config: `/data/plugins/u60pro-devui/devui.conf`
+- Loop flag: `/tmp/better-speedtest.loop`
+- Loop pid: `/tmp/better-speedtest.loop.pid`
 
 DevUI only stores small UI preferences in `devui.conf`:
 
@@ -31,34 +33,33 @@ DevUI does not rewrite `better-speedtest`'s own `config.json`.
 The screen-lock preview (`g_lock_state == 1`) intentionally keeps using the first
 page as a read-only signal overview, but it must not expose speedtest controls.
 
-- `speedtest_home_button_html()` returns empty while locked.
-- `speedtest_home_inline_html()` returns empty while locked.
+- The "更多功能" speedtest tile is not reachable from locked preview mode.
 - Native gauge/chart drawing is skipped while locked.
 - `speedtest_poll()` still runs, so backend detection and an already-running
   speedtest state remain fresh after unlock.
 
 ## Actions
 
-The inline panel uses these `act:` commands:
+The speedtest second-level page uses these `act:` commands:
 
-- `act:sttoggle`: expand or collapse the first-page speedtest panel.
+- `act:stpage`: open `ui/subpages/speedtest.html` when the backend is available.
 - `act:ststart`: run `better-speedtest test --json` with the selected source, direction, and duration.
 - `act:ststop`: kill the running `better-speedtest` process and reset the speedtest state.
 - `act:stsrc:<mode>`: select source, currently `auto`, `cnspeed`, `ookla`, or `cdn`.
 - `act:stdir:<mode>`: select direction, currently `both`, `dl`, or `ul`.
-- `act:stdur:<sec>`: select duration, currently `10`, `15`, or `20`.
+- `act:stdur:<sec>`: select duration, currently `10`, `15`, `20`, or `0`; `0` means loop until the user taps stop.
 
-`act:stpage` and `act:stclose` may remain accepted for compatibility with older templates, but the current UI should not depend on a standalone speedtest page.
+`act:sttoggle` and `act:stclose` may remain accepted for compatibility with older templates, but the current UI should use the second-level page.
 
 ## Rendering notes
 
 Speedtest visuals are hybrid-rendered:
 
-- HTML/CSS lays out the panel, option buttons, empty gauge placeholder, and empty chart placeholders.
+- HTML/CSS lays out the second-level page, option buttons, loop warning, empty gauge placeholder, chart placeholders, and log card.
 - Native drawing in `htmlmain.c` paints the circular gauge, pointer, live speed number, and two line charts.
 - Native drawing is clipped below the 26 px status bar so dragging the page cannot paint over the status bar.
 - Horizontal swipe previews render pages at the current scroll position and draw native chart layers into the preview buffers, so charts do not disappear during page swipes.
-- Chart under-fill uses deterministic non-alpha fill to avoid dark/light flicker from repeated translucent blending.
+- Chart under-fill follows the curve color in both dark and light themes.
 
 ## Install and uninstall convention
 
@@ -70,7 +71,7 @@ cp better-speedtest /data/plugins/better-speedtest/better-speedtest
 chmod +x /data/plugins/better-speedtest/better-speedtest
 ```
 
-No UI file copy is required for the current inline speedtest panel. The DevUI binary and default UI templates already contain the optional entry point; it only appears when the backend binary is present.
+No extra UI file copy is required for the current second-level speedtest page. The DevUI binary and default UI templates already contain the optional entry point; it only appears when the backend binary is present.
 
 To uninstall the optional speedtest backend:
 

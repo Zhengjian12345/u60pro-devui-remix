@@ -10,6 +10,8 @@
 #ifndef U60PRO_TOUCH_INPUT_H
 #define U60PRO_TOUCH_INPUT_H
 
+#define TOUCH_INPUT_QUEUE_LEN 16
+
 typedef struct {
     int fd;
     int screen_w;
@@ -26,9 +28,10 @@ typedef struct {
      * read() collapses to the final state. We record completed taps in a small
      * queue so callers never miss a fast tap. */
     int press_x, press_y, in_tap;
-    int tapq_x[8], tapq_y[8];
+    int tapq_x[TOUCH_INPUT_QUEUE_LEN], tapq_y[TOUCH_INPUT_QUEUE_LEN];
     int tapq_head, tapq_tail;
-    int strokeq_x0[8], strokeq_y0[8], strokeq_x1[8], strokeq_y1[8];
+    int strokeq_x0[TOUCH_INPUT_QUEUE_LEN], strokeq_y0[TOUCH_INPUT_QUEUE_LEN];
+    int strokeq_x1[TOUCH_INPUT_QUEUE_LEN], strokeq_y1[TOUCH_INPUT_QUEUE_LEN];
     int strokeq_head, strokeq_tail;
 } touch_input_t;
 
@@ -44,10 +47,21 @@ void touch_input_read(touch_input_t *t, int *x, int *y, int *pressed);
  * apply every tap that landed during a blocking render. */
 int  touch_input_take_tap(touch_input_t *t, int *x, int *y);
 
+/* Drain queued taps and return only the newest one. Use this for normal UI
+ * actions so fast repeated input does not replay slowly after a render stall. */
+int  touch_input_take_latest_tap(touch_input_t *t, int *x, int *y);
+
 /* Pop the oldest completed stroke (press->release), returning start/end points.
  * This lets callers recognize gestures even if the full drag lands between two
  * polling iterations. */
 int  touch_input_take_stroke(touch_input_t *t, int *x0, int *y0, int *x1, int *y1);
+
+/* Drain queued strokes and return only the newest one. */
+int  touch_input_take_latest_stroke(touch_input_t *t, int *x0, int *y0, int *x1, int *y1);
+
+/* Drop the release event that the caller has already handled through the live
+ * pressed->released edge. Keeps later queued taps/strokes intact. */
+void touch_input_drop_replayed_release(touch_input_t *t, int drop_tap);
 
 /* Drop any queued taps/strokes (call when switching context, e.g. entering a pad). */
 void touch_input_clear_taps(touch_input_t *t);

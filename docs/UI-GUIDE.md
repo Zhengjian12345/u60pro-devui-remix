@@ -31,11 +31,11 @@
 ```text
 /data/plugins/u60pro-devui/ui/
 ├── 01-signal.html    # 第 1 页（按文件名排序）：信号 / 载波
-├── 02-sms.html       # 第 2 页：短信列表（只读）
-├── 03-wifi.html      # 第 3 页：WiFi / 设备 / DHCP
-├── 04-lock.html      # 第 4 页：选网 / 锁频
+├── 02-functions.html # 第 2 页：更多功能入口
 ├── 05-charts.html    # 第 5 页：CPU / 内存 / 网速 图表
 ├── 06-system.html    # 第 6 页：系统信息 / 屏幕 / 开关（含锁屏开关）
+├── subpages/         # 内置二级页面：wifi / sms / cell / lock / speedtest
+├── functions/        # 用户自定义功能页，*.html 会自动出现在更多功能页
 ├── menu.html         # 电源键长按弹出的菜单（不算翻页）
 ├── lockscreen.html   # 锁屏 PIN 键盘（不算翻页，开启锁屏后覆盖显示）
 └── style.css         # 所有页面共享的样式
@@ -44,6 +44,8 @@
 - 文件名 `NN-名字.html` 的数字前缀决定**顺序**。想加一页，丢一个 `04-xxx.html` 进去即可，圆点指示会自动变成 4 个。
 - `menu.html` 是特殊页：电源键长按时覆盖显示，里面放关机/重启/取消。
 - `lockscreen.html` 是特殊页：开启锁屏后，超时/电源键锁屏时全屏显示 PIN 键盘（解锁正确才回到界面）；系统页锁屏开关从关→开时也用它设置新密码。
+- `subpages/*.html` 是内置二级页面，通过 `act:sub:<文件名>` 打开，`act:backfunc` 返回顶层页。
+- `functions/*.html` 是用户自定义二级页面，通过更多功能页自动扫描，示例见 `examples/custom-functions/`；示例不放进默认 `ui/`，避免安装后默认出现测试页面。
 - 特殊页按全屏覆盖层处理，不继承普通页面的竖向滚动位置。
 - 所有页面用 `<link rel="stylesheet" href="style.css">` 共享同一份样式。
 - 旧版若还残留 `/data/ui`，新版安装脚本会自动把它迁移到这里。
@@ -108,6 +110,7 @@ litehtml 不是浏览器，**限制比较多**，踩坑前先看这里：
 | `{{DOTS}}` | 底部翻页圆点，自动高亮当前页 |
 | `{{SMSLIST}}` | 短信页折叠列表（整段）：最多 32 条，每条号码 / 时间 + 一行预览，是可点的 `act:sms:ID` 卡片（点开弹完整内容的二级页面并标为已读），未读条目红点 + 蓝色号码高亮；无短信显示「暂无短信」 |
 | `{{SIGNALCARDS}}` | 默认第一页的完整信号区：运营商/制式/QCI/AMBR、载波卡片、信令解析附加指标、TA/品牌等高级卡片 |
+| `{{NEIGHBORCARDS}}` | 首页邻小区入口和展开列表；信令解析关闭时为空，展开后每行显示 `PCI / 频段 / RSRP / RSRQ` |
 | `{{CARRIERS}}` | 兼容旧模板的载波区：表头（组网模式 · L LTE + M NR 载波 · 总X MHz）+ 每载波一张卡片（频段·频宽 / EARFCN / PCI / RSRP / SINR，按质量上色，未激活置灰） |
 | `{{NETSEG}}` | 选网方式分段控件（自动 / 5G SA / 5G NSA / 4G，当前模式高亮，支持点/滑） |
 | `{{TOAST}}` | 居中提示气泡（无提示时为空），如"锁频成功" |
@@ -179,6 +182,11 @@ litehtml 不是浏览器，**限制比较多**，踩坑前先看这里：
 | `act:pin:del` | 锁屏键盘删除最后一位 |
 | `act:lockcancel` | 放弃 PIN 设置（仅设置键盘左下角） |
 | `act:poweroff` `act:reboot` `act:close` `act:menu` | 关机 / 重启 / 关菜单 / 开菜单（一般只在 `menu.html`） |
+| `act:sub:<html>` | 打开 `ui/subpages/` 下的内置二级页面 |
+| `act:func:<html>` | 打开 `ui/functions/` 下的自定义二级页面 |
+| `act:backfunc` | 从二级页面返回顶层页 |
+| `act:neighbors` | 首页展开 / 收起邻小区列表 |
+| `act:stpage` | 打开测速二级页（只有测速后端存在时更多功能页才显示入口） |
 
 例：一个开关按钮
 
@@ -265,6 +273,6 @@ adb push 04-about.html /data/plugins/u60pro-devui/ui/
 
 更深入的实现细节（渲染管线、令牌如何在 C 里生成、硬件接口）见 [DEVELOPMENT.md](DEVELOPMENT.md) 和 [HARDWARE.md](HARDWARE.md)。
 
-## Optional speedtest panel
+## Optional speedtest page
 
-The first page may show a `网络测速` toggle when `/data/plugins/better-speedtest/better-speedtest` is installed and executable. The panel expands inline below the signal cards and uses DevUI-native drawing for the gauge and line charts. Locked preview mode reuses the first page but hides this speedtest entry and panel; backend detection still runs for after unlock. See [`SPEEDTEST.md`](SPEEDTEST.md) for paths, actions, rendering notes, and install/uninstall conventions.
+The "更多功能" page may show a `网络测速` tile when `/data/plugins/better-speedtest/better-speedtest` is installed and executable. The tile opens `ui/subpages/speedtest.html`, which uses DevUI-native drawing for the gauge and line charts. Duration `0` is loop mode: the button turns into a loop start action and the page shows an orange traffic warning until the user taps stop. Locked preview mode does not expose speedtest controls; backend detection still runs for after unlock. See [`SPEEDTEST.md`](SPEEDTEST.md) for paths, actions, rendering notes, and install/uninstall conventions.

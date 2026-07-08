@@ -41,12 +41,11 @@ ubus 服务 ──▶ zwrt-datad ──▶ HTTP /state + SSE /events ──▶ u
 - `href="act:xxx"` 的链接是**动作**：点击后 UI 不跳转，而是执行对应动作（翻页指示、揭示密码、切主题、切 USB-C 模式等）。
 - 每次渲染都**重新读取**页面文件 = 改完 HTML 直接 `adb push` 到 `/data/plugins/u60pro-devui/ui` 即可热生效，不必重启进程。
 
-当前六页（左右滑动，底部圆点指示；`menu.html` 为电源长按覆盖层）。**页面按文件名编号排序**——v0.3.5 在信号页后插入短信页，其余顺延，所以编号从 v0.3.4 的 `02-wifi/03-lock/04-charts/05-system` 改成了下面这套（**改名是后面那个「插件更新残留」坑的根因**，见版本机制一节）：
+当前顶层页（左右滑动，底部圆点指示；`menu.html` 为电源长按覆盖层）。**页面按文件名编号排序**；v1.2.9 起 WiFi、短信、信令读取、锁频和测速收进“更多功能”二级页，减少顶层横滑页数。给页面改名/删页仍然会触发「插件更新残留」坑，见版本机制一节。
 
 - **01-signal.html — 信号**：状态栏；运营商 + 制式，右上角 QCI/AMBR；按载波分卡片（`频段·频宽 / EARFCN / PCI / RSRP / SINR`，按质量上色、未激活置灰）。当 datad 输出 `net.HSR=true` 时，主信号卡片会切换为紫色高铁模式并显示“高铁模式”；`mcc == 460` 且载波 `EARFCN/ARFCN` 命中高铁专网白名单 `507150, 527070, 531390, 153370, 505230, 627744, 634464, 423630` 时，单个 LTE/NR 载波卡片会染紫并标注“高铁专网”。真正 `HSR` 仍以 datad 信令确认为准。表头随组网模式（`5G SA / 5G NSA / EN-DC / 4G`）变化并显示 `L LTE + M NR 载波 · 总X MHz`。
-- **02-sms.html — 短信（只读）**：折叠卡片列表，每条号码/时间 + 一行预览；点卡片弹二级页看全文并标记已读。详见下方「短信（只读）」。
-- **03-wifi.html — WiFi**：SSID、密码（默认打码）、加密；WiFi 总开关 / 2.4G / 5G / 节能(PSM) / NFC 开关；已连接设备列表（在线过滤）；DHCP 信息（地址池实时由 uci 算）。
-- **04-lock.html — 锁频**：选网方式分段控件 + 5G SA / 5G NSA / 4G 三张锁频卡（点开二级弹窗，频段芯片一行四个）+ 恢复默认。
+- **02-functions.html — 更多功能**：进入 WiFi、短信、信令读取、锁频和可选测速二级页；同时扫描 `ui/functions/*.html` 作为用户自定义入口。
+- **ui/subpages/*.html — 二级页**：`wifi.html`、`sms.html`、`cell.html`、`lock.html`、`speedtest.html` 通过 `act:sub:<文件名>` 打开，统一用 `act:backfunc` 返回。
 - **05-charts.html — 图表**：CPU 占用+温度 / 内存 / 网速 / 电池(功率+温度) 四张原生折线图。
 - **06-system.html — 系统/设置**：CPU/内存占用、温度、充电器/电池电压电流、版本号、IMEI(打码)、QCI/AMBR 缓存；屏幕亮度滑条、自动息屏分段控件、锁屏 / 电源直供电(DPS) / USB-C 供电方向 / USB 网络共享 / 速率单位 / 主题 开关，并提供“刷新 AMBR 缓存”按钮。可竖向滚动。
 - **lockscreen.html — 锁屏键盘**：特殊页（同 `menu.html`，不计入翻页）。开启锁屏后由宿主在 `g_lock_state` 非 0 时全屏显示，4 位 PIN 数字键盘 + 删除键。状态栏（含未读短信信封图标）一并显示。详见下方「屏幕锁（PIN）」。
@@ -446,7 +445,7 @@ cp u60pro-devui.stripped u60pro-devui-aarch64
 (cd ui && COPYFILE_DISABLE=1 tar -czf ../ui.tar.gz -- *.html *.css)
 ```
 > **坑：插件 UI 更新会残留旧页面文件 → 页数翻倍。** 插件的 `installUiTemplates` 早期只 `cp -f` 覆盖、**不删旧文件**。v0.3.5 给页面改名后（`02-wifi`→`02-sms/03-wifi`…），旧名文件不会被同名覆盖，于是新旧并存——「5 页变 10 页」。修复：先把 `ui.tar.gz` 解压到临时目录并确认新页面数量，再清空 `/data/plugins/u60pro-devui/ui` 顶层旧 `*.html` / `*.css`（`.lockpin` 是点文件不受影响），最后复制新模板并核对安装后的页面数量；如果设备还遗留旧 `/data/ui`，则先迁移再删除。**给页面改名/删页是个跨版本兼容陷阱，更新逻辑必须先校验、再清场、再铺新文件。** 已中招的用户点「重装UI」即可自愈；如果远端版本变了，正常「更新 UI」也会走同一套清理逻辑。（插件运行在原厂 Web 后台，不在本仓库；改完重新部署插件即可，不走 release。）
-> **坑：`ui.tar.gz` 的打包结构必须和旧版保持一致。** 设备侧更新逻辑默认期望的是“**顶层平铺页面文件**”的 tar 包：只有 `01-signal.html`、`02-sms.html`、…、`style.css`，**没有** `ui/` 目录、**没有** `./` 前缀、**没有** macOS 产生的 `._*` AppleDouble 文件。用 macOS 自带打包工具直接打整个目录时，容易把这些额外条目也塞进去，导致 UI 更新失败。打包时应显式关闭资源叉（如 `COPYFILE_DISABLE=1`），并直接列出页面文件名生成 tar。
+> **坑：`ui.tar.gz` 的打包结构必须和旧版保持一致。** 设备侧更新逻辑默认期望的是“**顶层平铺页面文件**”的 tar 包：顶层直接是 `01-signal.html`、`02-functions.html`、`style.css`、`subpages/...`，**没有** `ui/` 目录、**没有** `./` 前缀、**没有** macOS 产生的 `._*` AppleDouble 文件。用 macOS 自带打包工具直接打整个目录时，容易把这些额外条目也塞进去，导致 UI 更新失败。打包时应显式关闭资源叉（如 `COPYFILE_DISABLE=1`），并直接列出页面文件名生成 tar；`examples/custom-functions/` 不属于默认 UI 包。
 
 ## 仓库约定
 
@@ -511,10 +510,11 @@ cp u60pro-devui.stripped u60pro-devui-aarch64
 
 ## Optional speedtest integration
 
-The current speedtest UX is documented in [`SPEEDTEST.md`](SPEEDTEST.md). In short: DevUI does not bundle `better-speedtest`; when `/data/plugins/better-speedtest/better-speedtest` is executable, the first page shows an inline `网络测速` toggle below the signal cards. Locked preview mode reuses the first page but hides the speedtest entry and native widgets. The old standalone `07-speedtest.html` page has been removed and should not be shipped in current UI packages.
+The current speedtest UX is documented in [`SPEEDTEST.md`](SPEEDTEST.md). In short: DevUI does not bundle `better-speedtest`; when `/data/plugins/better-speedtest/better-speedtest` is executable, the "更多功能" page shows a `网络测速` tile that opens `ui/subpages/speedtest.html`. Duration `0` is a loop mode that repeats 15-second tests until stopped. Locked preview mode hides speedtest controls and native widgets. The old standalone `07-speedtest.html` swipe page has been removed and should not be shipped in current UI packages.
 
 ## 2026-07-08 信号卡片与锁屏预览补记
 
 - 第一页默认模板使用 `{{SIGNALCARDS}}` 作为完整信号区；`{{CARRIERS}}` 只作为旧模板兼容令牌保留。信号卡片、未激活/高铁专网标签、ML1 附加指标和锁屏预览边界统一整理到 [`SIGNAL-CARDS.md`](SIGNAL-CARDS.md)。
+- `{{NEIGHBORCARDS}}` 作为首页邻小区入口，信令解析关闭时返回空串；展开后按 `PCI / 频段 / RSRP / RSRQ` 显示 LTE/NR 邻区。
 - `未激活` 和 `高铁专网` 标签继续使用 `.coff` / `.chsr`，文字在真机字体下上移约 1px 做视觉居中。不要为了修圆角把高铁紫色边框删掉；圆角突出应通过 renderer 按 `border-radius` 裁切背景，或卡片 `overflow:hidden` 处理。
 - 锁屏预览继续复用第一页，但测速入口、测速展开面板和 native gauge/chart 均隐藏；`speedtest_poll()` 保留，避免解锁后测速后端状态滞后。
