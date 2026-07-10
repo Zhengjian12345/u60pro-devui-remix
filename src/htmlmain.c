@@ -2341,19 +2341,6 @@ static int datad_set_signal_parse(int on)
     return system(cmd) == 0 ? 0 : -1;
 }
 
-static int modem_request_network_rescan(void)
-{
-    char cmd[512];
-
-    if (snprintf(cmd, sizeof cmd,
-                 "(/usr/bin/wget -qO- --post-data='' 'http://%s:%d/modem/control?ml1_raw=1&lte=1&nr=1&active=1&poll_ms=500' >/dev/null 2>&1; "
-                 "/usr/bin/ubus call zte_nwinfo_api nwinfo_scan_nbr '{}' >/dev/null 2>&1; "
-                 "/usr/bin/ubus call zte_nwinfo_api nwinfo_get_netinfo '{}' >/dev/null 2>&1) >/dev/null 2>&1 &",
-                 DATAD_HTTP_ADDR, DATAD_HTTP_PORT) >= (int)sizeof cmd)
-        return -1;
-    return system(cmd) == 0 ? 0 : -1;
-}
-
 #define SIGNAL_CACHE_PATH "/data/plugins/u60pro-devui/signal.cache"
 
 static int signal_cache_get(const char *key, char *dst, size_t cap)
@@ -3786,43 +3773,58 @@ static int signal_neighbor_section(char *buf, int o, int cap, const char *title,
     return o;
 }
 
+static const char *signal_neighbor_empty_text(void)
+{
+    return "等待 LTE / NR ML1 邻区测量。";
+}
+
 static const char *signal_neighbors_html(const struct signal_bundle *sig)
 {
     static char buf[7000];
     int nr_count = sig ? signal_neighbor_count(sig->nr_neighbors, sig->nr_neighbor_n) : 0;
     int lte_count = sig ? signal_neighbor_count(sig->lte_neighbors, sig->lte_neighbor_n) : 0;
     int total = nr_count + lte_count;
+    const char *source = g_sig_parse ? "信令解析" : "";
     int o = 0;
 
-    if (!signal_live_enabled()) {
-        buf[0] = '\0';
+    if (!g_sig_parse) {
+        buf[0] = 0;
         return buf;
     }
 
     if (!g_neighbor_open) {
-        snprintf(buf, sizeof buf,
-                 "<a href='act:neighbors' class='card neigh-toggle'>"
-                 "<span class='title'>邻小区</span><span class='r muted'>%d 个 · 点击展开</span>"
-                 "</a>",
-                 total);
+        if (source[0])
+            snprintf(buf, sizeof buf,
+                     "<a href='act:neighbors' class='card neigh-toggle'>"
+                     "<span class='title'>邻小区</span><span class='r muted'>%s · %d 个 · 点击展开</span>"
+                     "</a>",
+                     source, total);
+        else
+            snprintf(buf, sizeof buf,
+                     "<a href='act:neighbors' class='card neigh-toggle'>"
+                     "<span class='title'>邻小区</span><span class='r muted'>%d 个 · 点击展开</span>"
+                     "</a>",
+                     total);
         return buf;
     }
 
-    o += snprintf(buf + o, sizeof buf - o,
-                  "<div class='card neigh-card'>"
-                  "<div class='title'>邻小区 <a href='act:neighbors' class='rev r'>收起</a></div>");
-    if (!signal_live_enabled()) {
+    if (source[0])
         o += snprintf(buf + o, sizeof buf - o,
-                      "<div class='sec'>信令解析已关闭，开启后显示 LTE / NR 邻区。</div>");
-    } else if (total <= 0) {
+                      "<div class='card neigh-card'>"
+                      "<div class='title'>邻小区 <span class='muted nsrc'>%s</span>"
+                      "<a href='act:neighbors' class='rev r'>收起</a></div>",
+                      source);
+    else
         o += snprintf(buf + o, sizeof buf - o,
-                      "<div class='sec'>等待 LTE / NR ML1 邻区测量。</div>"
-                      "<a href='act:sigrescan' class='neigh-rescan'>刷新邻区</a>");
+                      "<div class='card neigh-card'>"
+                      "<div class='title'>邻小区 <a href='act:neighbors' class='rev r'>收起</a></div>");
+    if (total <= 0) {
+        o += snprintf(buf + o, sizeof buf - o,
+                      "<div class='sec'>%s</div>",
+                      signal_neighbor_empty_text());
     } else {
         o = signal_neighbor_section(buf, o, sizeof buf, "NR", sig->nr_neighbors, sig->nr_neighbor_n);
         o = signal_neighbor_section(buf, o, sizeof buf, "LTE", sig->lte_neighbors, sig->lte_neighbor_n);
-        o += snprintf(buf + o, sizeof buf - o,
-                      "<a href='act:sigrescan' class='neigh-rescan'>刷新邻区</a>");
     }
     snprintf(buf + o, sizeof buf - o, "</div>");
     return buf;
@@ -4228,8 +4230,6 @@ static int build_kv(struct kv *t, const char *path)
                      "<div class='card'><div class='title'>信令信息</div><div class='sec'>当前网络没有可展示的 LTE / NR 信令卡片。</div></div>");
             so = (int)strlen(s_signalcards);
         }
-        so += snprintf(s_signalcards + so, sizeof s_signalcards - so,
-                       "<a href='act:sigrescan' class='card resetbtn2'>重新搜网</a>");
     } else {
         snprintf(s_nrports, sizeof s_nrports, "-");
         snprintf(s_nrbeam, sizeof s_nrbeam, "-");
@@ -5532,8 +5532,21 @@ int main(void)
             dragging = 0; drag_dir = 0; scroll_dir = 0; sliding = 0; segging = 0;
             scroll_inertia = 0; scroll_track_valid = 0; scroll_v = 0.0f;
         } else if (g_sms_open >= 0) {
-            /* SMS detail dialog: any tap (close button or outside) dismisses */
-            if (!pressed && prev_press) { g_sms_open = -1; need_render = 1; }
+            /* The release that closes this overlay is also latched as a tap. Consume
+             * it here so it cannot replay against the SMS card underneath. */
+            if (!pressed && prev_press) {
+                g_sms_open = -1;
+                touch_input_drop_replayed_release(&touch, 1);
+                need_render = 1;
+            } else if (!pressed) {
+                /* A full tap can arrive while a render was in progress, with no
+                 * observable pressed edge in this loop. It belongs to the modal too. */
+                int tx, ty;
+                if (touch_input_take_latest_tap(&touch, &tx, &ty)) {
+                    g_sms_open = -1;
+                    need_render = 1;
+                }
+            }
         } else if (g_modal) {
             /* second-level band-lock dialog: tap only (level-1 is disabled) */
             if (!pressed && prev_press) {
@@ -5559,12 +5572,6 @@ int main(void)
                             invalidate_render_html_cache();
                             snprintf(g_toast, sizeof g_toast, "信令解析已%s", g_sig_parse ? "开启" : "关闭");
                             g_toast_until = now + 1600;
-                            need_render = 1;
-                        } else if (!strcmp(a, "sigrescan")) {
-                            (void)modem_request_network_rescan();
-                            snprintf(g_toast, sizeof g_toast, "已请求信令/邻区刷新，不会断网");
-                            g_toast_until = now + 2200;
-                            invalidate_render_html_cache();
                             need_render = 1;
                         } else if (!strcmp(a, "closemodal")) {
                             g_modal = 0;
@@ -5911,13 +5918,6 @@ int main(void)
                             system("(kill -USR1 $(pidof zwrt-datad 2>/dev/null) >/dev/null 2>&1) || true");
                             snprintf(g_toast, sizeof g_toast, "已请求刷新 AMBR");
                             g_toast_until = now + 1600;
-                            need_render = 1;
-                        }
-                        else if (!strcmp(a, "sigrescan")) {
-                            (void)modem_request_network_rescan();
-                            snprintf(g_toast, sizeof g_toast, "已请求信令/邻区刷新，不会断网");
-                            g_toast_until = now + 2200;
-                            invalidate_render_html_cache();
                             need_render = 1;
                         }
                         else if (!strcmp(a, "neighbors")) {
