@@ -1,4 +1,21 @@
-# u60pro-devui
+# u60pro-devui-remix
+
+这是基于 [33333s/u60pro-devui](https://github.com/33333s/u60pro-devui) v1.2.11 的 Remix 版本，保留原项目提交历史和目录结构。
+
+本分支增加了 UFI-TOOLS 环境下的 Tailscale 与 Clash / Mihomo 屏幕控制页面：
+
+- 从 `ui/functions/` 自动加载 Tailscale 和 Clash / Mihomo 功能页。
+- 显示服务状态、版本、进程、Tailscale 地址、子网路由和 Mihomo 透明代理状态。
+- 提供启动、停止、重启和手动刷新操作，启动/停止按真实状态高亮。
+- 页面内显示最近三条带时间戳的操作记录，并保留即时 toast 反馈。
+- 只允许调用固定控制脚本，不向自定义 HTML 暴露任意 Shell 执行能力。
+
+对应设备路径为：
+
+```text
+/data/plugins/tailscale/tsctl.sh
+/data/ufi-tools/mihomo/mm.sh
+```
 
 这是 ZTE U60Pro 以及类似 SDX 系列 5G MiFi 设备前面板屏幕 UI 的一个 clean-room 开源替代实现。运行在标准 Linux 的 **DRM/KMS** 和 **evdev** 接口之上，目标是：
 

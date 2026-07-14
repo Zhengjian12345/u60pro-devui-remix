@@ -77,6 +77,24 @@ static uint32_t millis(void)
     return (uint32_t)(ts.tv_sec * 1000 + ts.tv_nsec / 1000000);
 }
 
+/* Optional service pages under ui/functions/.  These fixed paths intentionally
+ * avoid a generic "run shell from HTML" action: custom pages remain data-only,
+ * while the two known local services get a small, auditable control surface. */
+#define TAILSCALE_CTL "/data/plugins/tailscale/tsctl.sh"
+#define TAILSCALE_DIR "/data/plugins/tailscale"
+#define TAILSCALE_ACTION_LOG "/tmp/devui-tailscale-action.log"
+#define MIHOMO_CTL    "/data/ufi-tools/mihomo/mm.sh"
+#define MIHOMO_DIR    "/data/ufi-tools/mihomo"
+#define MIHOMO_ACTION_LOG "/tmp/devui-mihomo-action.log"
+
+static uint32_t g_plugin_status_at;
+static int g_ts_installed, g_ts_running, g_ts_connected, g_ts_boot;
+static int g_mh_installed, g_mh_running, g_mh_tun, g_mh_rules;
+static char g_ts_pid[16] = "-", g_ts_ip[48] = "-", g_ts_version[32] = "-";
+static char g_ts_host[64] = "-", g_ts_routes[160] = "-";
+static char g_mh_pid[16] = "-", g_mh_version[64] = "-", g_mh_mode[24] = "-";
+static char g_mh_port[16] = "-", g_mh_ipset[24] = "-";
+
 #define TEMPLATE_CACHE_CAP 8
 #define PAGE_HTML_CACHE_CAP 1048576
 
@@ -756,6 +774,153 @@ static void wifi_aux_refresh(void)
         }
     }
     pclose(fp);
+}
+
+static void line_value(char *dst, size_t cap, const char *line, size_t prefix_len)
+{
+    const char *src = line + prefix_len;
+    size_t len = strcspn(src, "\r\n");
+    if (len >= cap) len = cap - 1;
+    memcpy(dst, src, len);
+    dst[len] = 0;
+    if (!dst[0]) snprintf(dst, cap, "-");
+}
+
+static void plugin_action_log_html(char *dst, size_t cap, const char *path)
+{
+    FILE *fp;
+    char line[320], last[3][320], esc[640];
+    int seen = 0, o = 0;
+
+    dst[0] = 0;
+    fp = fopen(path, "r");
+    if (fp) {
+        while (fgets(line, sizeof line, fp)) {
+            size_t len = strcspn(line, "\r\n");
+            line[len] = 0;
+            if (!line[0]) continue;
+            snprintf(last[seen % 3], sizeof last[0], "%s", line);
+            seen++;
+        }
+        fclose(fp);
+    }
+    if (!seen) {
+        snprintf(dst, cap, "<div class='svc-log-empty'>暂无操作记录</div>");
+        return;
+    }
+    int count = seen < 3 ? seen : 3;
+    int start = seen < 3 ? 0 : seen % 3;
+    for (int i = 0; i < count && o < (int)cap - 1; i++) {
+        html_esc(esc, sizeof esc, last[(start + i) % 3]);
+        o += snprintf(dst + o, cap - (size_t)o,
+                      "<div class='svc-log-line'>%s</div>", esc);
+    }
+}
+
+static void plugin_action_note(const char *path, const char *text)
+{
+    FILE *fp = fopen(path, "a");
+    char stamp[32];
+    FILE *date_fp;
+    if (!fp) return;
+    snprintf(stamp, sizeof stamp, "-");
+    date_fp = popen("TZ=CST-8 date '+%F %T'", "r");
+    if (date_fp) {
+        if (fgets(stamp, sizeof stamp, date_fp))
+            stamp[strcspn(stamp, "\r\n")] = 0;
+        pclose(date_fp);
+    }
+    fprintf(fp, "[%s] %s\n", stamp, text);
+    fclose(fp);
+}
+
+static void plugin_action_submit(const char *log_path, const char *runner,
+                                 const char *ctl, const char *verb, const char *label)
+{
+    char cmd[1536];
+    snprintf(cmd, sizeof cmd,
+             "nohup sh -c 'export TZ=CST-8; log=\"%s\"; tmp=\"${log}.out.$$\"; "
+             "printf \"[%%s] 开始执行：%s\\n\" \"$(date \"+%%F %%T\")\" >>\"$log\"; "
+             "%s%s %s >\"$tmp\" 2>&1; rc=$?; "
+             "while IFS= read -r line || [ -n \"$line\" ]; do "
+             "printf \"[%%s] %%s\\n\" \"$(date \"+%%F %%T\")\" \"$line\"; done <\"$tmp\" >>\"$log\"; "
+             "rm -f \"$tmp\"; printf \"[%%s] 执行完成：%s，退出码 %%s\\n\" "
+             "\"$(date \"+%%F %%T\")\" \"$rc\" >>\"$log\"; "
+             "tail -n 30 \"$log\" >\"$log.trim\" && mv \"$log.trim\" \"$log\"; exit \"$rc\"' "
+             ">/dev/null 2>&1 &",
+             log_path, label, runner, ctl, verb, label);
+    system(cmd);
+}
+
+static int plugin_status_page(const char *path)
+{
+    return path && (strstr(path, "/functions/tailscale.html") ||
+                    strstr(path, "/functions/clash.html") ||
+                    strstr(path, "/functions/mihomo.html"));
+}
+
+static void plugin_status_refresh(const char *path, int force)
+{
+    uint32_t now = millis();
+    FILE *fp;
+    char line[256];
+
+    if (!plugin_status_page(path)) return;
+    if (!force && g_plugin_status_at && now - g_plugin_status_at < 2000) return;
+    g_plugin_status_at = now;
+
+    g_ts_installed = g_ts_running = g_ts_connected = g_ts_boot = 0;
+    g_mh_installed = g_mh_running = g_mh_tun = g_mh_rules = 0;
+    snprintf(g_ts_pid, sizeof g_ts_pid, "-");
+    snprintf(g_ts_ip, sizeof g_ts_ip, "-");
+    snprintf(g_ts_version, sizeof g_ts_version, "-");
+    snprintf(g_ts_host, sizeof g_ts_host, "-");
+    snprintf(g_ts_routes, sizeof g_ts_routes, "-");
+    snprintf(g_mh_pid, sizeof g_mh_pid, "-");
+    snprintf(g_mh_version, sizeof g_mh_version, "-");
+    snprintf(g_mh_mode, sizeof g_mh_mode, "-");
+    snprintf(g_mh_port, sizeof g_mh_port, "-");
+    snprintf(g_mh_ipset, sizeof g_mh_ipset, "-");
+
+    fp = popen(
+        "echo TS_INST=$([ -x " TAILSCALE_CTL " ] && [ -x " TAILSCALE_DIR "/bin/tailscale ] && echo 1 || echo 0);"
+        "tpid=$(pidof tailscaled 2>/dev/null | awk '{print $1}'); echo TS_PID=${tpid:--};"
+        "tip=$(ip -4 addr show dev tailscale0 2>/dev/null | awk '/inet /{sub(/\\/.*/,\"\",$2);print $2;exit}'); echo TS_IP=${tip:--};"
+        "echo TS_VER=$(sed -n '1{s/[[:space:]].*//;p;q}' " TAILSCALE_DIR "/version.txt 2>/dev/null);"
+        "echo TS_HOST=$(sed -n 's/.*\"hostname\":\"\\([^\"]*\\)\".*/\\1/p' " TAILSCALE_DIR "/config.json 2>/dev/null);"
+        "echo TS_ROUTES=$(sed -n 's/.*\"advertise_routes\":\"\\([^\"]*\\)\".*/\\1/p' " TAILSCALE_DIR "/config.json 2>/dev/null);"
+        "grep -q '\"auto_start\":true' " TAILSCALE_DIR "/config.json 2>/dev/null && echo TS_BOOT=1 || echo TS_BOOT=0;"
+        "echo MH_INST=$([ -x " MIHOMO_CTL " ] && [ -x " MIHOMO_DIR "/mihomo ] && echo 1 || echo 0);"
+        "mpid=$(pidof mihomo 2>/dev/null | awk '{print $1}'); echo MH_PID=${mpid:--};"
+        "[ -d /sys/class/net/utun ] && echo MH_TUN=1 || echo MH_TUN=0;"
+        "ip rule show 2>/dev/null | grep -q 'lookup 2022' && echo MH_RULES=1 || echo MH_RULES=0;"
+        "echo MH_VER=$(" MIHOMO_DIR "/mihomo -v 2>/dev/null | awk 'NR==1{print $3;exit}');"
+        "echo MH_MODE=$(sed -n 's/^mode:[[:space:]]*//p' " MIHOMO_DIR "/config.yaml 2>/dev/null | head -1);"
+        "echo MH_PORT=$(sed -n 's/^mixed-port:[[:space:]]*//p' " MIHOMO_DIR "/config.yaml 2>/dev/null | head -1);"
+        "echo MH_IPSET=$(ipset list chnroute 2>/dev/null | awk -F': ' '/Number of entries/{print $2;exit}')",
+        "r");
+    if (!fp) return;
+    while (fgets(line, sizeof line, fp)) {
+        if      (!strncmp(line, "TS_INST=", 8))   g_ts_installed = atoi(line + 8);
+        else if (!strncmp(line, "TS_PID=", 7))    line_value(g_ts_pid, sizeof g_ts_pid, line, 7);
+        else if (!strncmp(line, "TS_IP=", 6))     line_value(g_ts_ip, sizeof g_ts_ip, line, 6);
+        else if (!strncmp(line, "TS_VER=", 7))    line_value(g_ts_version, sizeof g_ts_version, line, 7);
+        else if (!strncmp(line, "TS_HOST=", 8))   line_value(g_ts_host, sizeof g_ts_host, line, 8);
+        else if (!strncmp(line, "TS_ROUTES=", 10)) line_value(g_ts_routes, sizeof g_ts_routes, line, 10);
+        else if (!strncmp(line, "TS_BOOT=", 8))   g_ts_boot = atoi(line + 8);
+        else if (!strncmp(line, "MH_INST=", 8))   g_mh_installed = atoi(line + 8);
+        else if (!strncmp(line, "MH_PID=", 7))    line_value(g_mh_pid, sizeof g_mh_pid, line, 7);
+        else if (!strncmp(line, "MH_TUN=", 7))    g_mh_tun = atoi(line + 7);
+        else if (!strncmp(line, "MH_RULES=", 9))  g_mh_rules = atoi(line + 9);
+        else if (!strncmp(line, "MH_VER=", 7))    line_value(g_mh_version, sizeof g_mh_version, line, 7);
+        else if (!strncmp(line, "MH_MODE=", 8))   line_value(g_mh_mode, sizeof g_mh_mode, line, 8);
+        else if (!strncmp(line, "MH_PORT=", 8))   line_value(g_mh_port, sizeof g_mh_port, line, 8);
+        else if (!strncmp(line, "MH_IPSET=", 9))  line_value(g_mh_ipset, sizeof g_mh_ipset, line, 9);
+    }
+    pclose(fp);
+    g_ts_running = strcmp(g_ts_pid, "-") != 0;
+    g_ts_connected = g_ts_running && strcmp(g_ts_ip, "-") != 0;
+    g_mh_running = strcmp(g_mh_pid, "-") != 0;
 }
 
 /* ---- screen lock (PIN) persistence. The PIN lives in a dotfile under the UI
@@ -3874,6 +4039,7 @@ static int build_kv(struct kv *t, const char *path)
     static struct signal_bundle sig;
     int ta = -1;
     if (!data_refresh(&d)) memset(&d, 0, sizeof d);
+    plugin_status_refresh(path, 0);
     g_charging = d.charger_connect;
     snprintf(s_page, sizeof s_page, "%d", g_cur + 1);
     snprintf(s_np, sizeof s_np, "%d", g_npages);
@@ -4455,6 +4621,7 @@ static int build_kv(struct kv *t, const char *path)
     /* ---- band lock: universe grows to the largest set seen; selection mirrors
      * the live lock unless the user is editing in the modal ---- */
     static char s_netseg[640], s_cursa[300], s_curnsa[300], s_curlte[300], s_toast[120];
+    static char s_ts_action_log[2200], s_mh_action_log[2200];
     if (band_count(d.sa_bands)  >= band_count(g_uni_sa))  snprintf(g_uni_sa,  sizeof g_uni_sa,  "%s", d.sa_bands);
     if (band_count(d.nsa_bands) >= band_count(g_uni_nsa)) snprintf(g_uni_nsa, sizeof g_uni_nsa, "%s", d.nsa_bands);
     if (band_count(d.lte_bands) >= band_count(g_uni_lte)) snprintf(g_uni_lte, sizeof g_uni_lte, "%s", d.lte_bands);
@@ -4733,12 +4900,37 @@ static int build_kv(struct kv *t, const char *path)
     t[i++] = (struct kv){ "LOCKMSG", g_lock_err ? "<div class='lock-err'>密码错误</div>" : "" };
     t[i++] = (struct kv){ "LOCKCLASS", lock_enabled() ? "on" : "off" };
     t[i++] = (struct kv){ "LOCKSTATE", lock_enabled() ? "已开启" : "已关闭" };
+    t[i++] = (struct kv){ "TSSTATE", !g_ts_installed ? "未安装" : g_ts_connected ? "已连接" : g_ts_running ? "等待连接" : "已停止" };
+    t[i++] = (struct kv){ "TSSTATECLASS", g_ts_connected ? "ok" : "muted" };
+    t[i++] = (struct kv){ "TSRUNCLASS", g_ts_running ? "seg-on" : "" };
+    t[i++] = (struct kv){ "TSSTOPCLASS", g_ts_installed && !g_ts_running ? "seg-on" : "" };
+    t[i++] = (struct kv){ "TSIP", g_ts_ip };
+    t[i++] = (struct kv){ "TSPID", g_ts_pid };
+    t[i++] = (struct kv){ "TSVERSION", g_ts_version };
+    t[i++] = (struct kv){ "TSHOST", g_ts_host };
+    t[i++] = (struct kv){ "TSROUTES", g_ts_routes };
+    t[i++] = (struct kv){ "TSBOOT", g_ts_boot ? "已开启" : "已关闭" };
+    plugin_action_log_html(s_ts_action_log, sizeof s_ts_action_log, TAILSCALE_ACTION_LOG);
+    t[i++] = (struct kv){ "TSACTIONLOG", s_ts_action_log };
+    t[i++] = (struct kv){ "MHSTATE", !g_mh_installed ? "未安装" : g_mh_running && g_mh_tun && g_mh_rules ? "代理运行中" : g_mh_running ? "进程运行，规则未就绪" : "已停止" };
+    t[i++] = (struct kv){ "MHSTATECLASS", g_mh_running && g_mh_tun && g_mh_rules ? "ok" : "muted" };
+    t[i++] = (struct kv){ "MHRUNCLASS", g_mh_running ? "seg-on" : "" };
+    t[i++] = (struct kv){ "MHSTOPCLASS", g_mh_installed && !g_mh_running ? "seg-on" : "" };
+    t[i++] = (struct kv){ "MHPID", g_mh_pid };
+    t[i++] = (struct kv){ "MHVERSION", g_mh_version };
+    t[i++] = (struct kv){ "MHMODE", g_mh_mode };
+    t[i++] = (struct kv){ "MHPORT", g_mh_port };
+    t[i++] = (struct kv){ "MHTUN", g_mh_tun ? "已就绪" : "未就绪" };
+    t[i++] = (struct kv){ "MHRULES", g_mh_rules ? "已接管" : "未接管" };
+    t[i++] = (struct kv){ "MHIPSET", g_mh_ipset };
+    plugin_action_log_html(s_mh_action_log, sizeof s_mh_action_log, MIHOMO_ACTION_LOG);
+    t[i++] = (struct kv){ "MHACTIONLOG", s_mh_action_log };
     return i;
 }
 
 static void refresh_status_cache(void)
 {
-    struct kv t[192];
+    struct kv t[256];
     (void)build_kv(t, NULL);
 }
 
@@ -4756,7 +4948,7 @@ static const char *custom_page_html(const char *path)
     const char *start, *end, *body, *gt;
     char *body_src;
     size_t len;
-    struct kv t[192];
+    struct kv t[256];
     int n;
     char raw_title[96], title[160];
     const char *base;
@@ -4822,7 +5014,7 @@ static const char *page_html(const char *path)
     if (path_is_function_page(path)) return custom_page_html(path);
     const char *tmpl = read_template_cached(path);   /* cache templates with mtime invalidation */
     if (!tmpl) return NULL;
-    struct kv t[192];
+    struct kv t[256];
     int n = build_kv(t, path);
     char *html = apply_template(tmpl, t, n);
     return html;
@@ -6318,6 +6510,48 @@ int main(void)
                             last_act = now;
                             need_render = 1;
                         }
+                        else if (!strcmp(a, "tsstart") || !strcmp(a, "tsstop") ||
+                                 !strcmp(a, "tsrestart") || !strcmp(a, "tsrefresh")) {
+                            const char *verb = !strcmp(a, "tsstart") ? "start" :
+                                               !strcmp(a, "tsstop") ? "stop" : "restart";
+                            if (!strcmp(a, "tsrefresh")) {
+                                plugin_status_refresh(CUR_PATH, 1);
+                                plugin_action_note(TAILSCALE_ACTION_LOG, "手动刷新状态");
+                                snprintf(g_toast, sizeof g_toast, "Tailscale 状态已刷新");
+                            } else if (!g_ts_installed) {
+                                snprintf(g_toast, sizeof g_toast, "Tailscale 尚未安装");
+                            } else {
+                                const char *label = !strcmp(verb, "start") ? "启动" :
+                                                    !strcmp(verb, "stop") ? "停止" : "重启";
+                                plugin_action_submit(TAILSCALE_ACTION_LOG, "", TAILSCALE_CTL, verb, label);
+                                snprintf(g_toast, sizeof g_toast, "Tailscale %s已提交", label);
+                                g_plugin_status_at = 0;
+                            }
+                            g_toast_until = now + 1800;
+                            last_act = now;
+                            need_render = 1;
+                        }
+                        else if (!strcmp(a, "mhstart") || !strcmp(a, "mhstop") ||
+                                 !strcmp(a, "mhrestart") || !strcmp(a, "mhrefresh")) {
+                            const char *verb = !strcmp(a, "mhstart") ? "start" :
+                                               !strcmp(a, "mhstop") ? "stop" : "restart";
+                            if (!strcmp(a, "mhrefresh")) {
+                                plugin_status_refresh(CUR_PATH, 1);
+                                plugin_action_note(MIHOMO_ACTION_LOG, "手动刷新状态");
+                                snprintf(g_toast, sizeof g_toast, "Mihomo 状态已刷新");
+                            } else if (!g_mh_installed) {
+                                snprintf(g_toast, sizeof g_toast, "Mihomo 尚未安装");
+                            } else {
+                                const char *label = !strcmp(verb, "start") ? "启动" :
+                                                    !strcmp(verb, "stop") ? "停止" : "重启";
+                                plugin_action_submit(MIHOMO_ACTION_LOG, "sh ", MIHOMO_CTL, verb, label);
+                                snprintf(g_toast, sizeof g_toast, "Mihomo %s已提交", label);
+                                g_plugin_status_at = 0;
+                            }
+                            g_toast_until = now + 1800;
+                            last_act = now;
+                            need_render = 1;
+                        }
                         else if (!strncmp(a, "stsrc:", 6)) {
                             snprintf(g_st_src, sizeof g_st_src, "%s", speedtest_norm_src(a + 6));
                             save_conf();
@@ -6446,6 +6680,7 @@ action_done:
                 }
                 if (g_refresh_ms > 0 && signal_live_enabled() && path_is_signal_page(CUR_PATH))
                     state_render = 1;
+                if (plugin_status_page(CUR_PATH)) state_render = 1;
                 if (state_render) need_render = 1;
                 if (ext_ok && devui_ext_active(&ext) && !g_lock_state &&
                     (clock_changed || (g_refresh_ms > 0 && state_changed)))
