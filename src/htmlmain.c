@@ -1360,6 +1360,21 @@ static int subpage_name_ok(const char *name)
     return l > 5 && strcmp(name + l - 5, ".html") == 0;
 }
 
+/* Known service pages are useful only when their auditable control adapter is
+ * installed. Treat that executable adapter as the local plugin API: checking
+ * it keeps the launcher aligned with what the page can actually control. */
+static int function_control_api_available(const char *name)
+{
+    if (!name) return 0;
+    if (!strcmp(name, "tailscale.html"))
+        return access(TAILSCALE_CTL, X_OK) == 0;
+    if (!strcmp(name, "clash.html") || !strcmp(name, "mihomo.html"))
+        return access(MIHOMO_CTL, X_OK) == 0;
+    if (!strcmp(name, "cpu-performance.html"))
+        return access(CPU_CTL, X_OK) == 0;
+    return 1;
+}
+
 static int subpage_open(const char *name)
 {
     char path[300];
@@ -1376,6 +1391,7 @@ static int function_page_open(const char *name)
 {
     char path[300];
     if (!subpage_name_ok(name)) return 0;
+    if (!function_control_api_available(name)) return 0;
     snprintf(path, sizeof path, "%s/%s", FUNCTIONS_DIR, name);
     if (access(path, R_OK) != 0) return 0;
     snprintf(g_subpage, sizeof g_subpage, "func:%s", name);
@@ -1488,6 +1504,7 @@ static const char *custom_function_tiles_html(void)
     while ((de = readdir(dp)) && n < 32) {
         if (de->d_name[0] == '.') continue;
         if (!subpage_name_ok(de->d_name)) continue;
+        if (!function_control_api_available(de->d_name)) continue;
         snprintf(names[n], sizeof names[n], "%s", de->d_name);
         n++;
     }
