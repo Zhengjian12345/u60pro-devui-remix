@@ -5527,6 +5527,19 @@ static int prep_pair(drm_disp_t *d, int target, int dir)
     return 1;
 }
 
+static int prep_subpage_back(drm_disp_t *d)
+{
+    const char *h;
+    if (!g_subpage[0] || g_npages <= 0 || !ensure_pair_buffers()) return 0;
+    html_view_set_scroll(0);
+    h = page_html(g_pages[g_cur]);
+    render_page_to_pair_buf(g_bufA, g_pages[g_cur], h, 0);
+    capture_fb_logical(d, g_bufB);
+    html_view_set_scroll(g_scroll);
+    g_gesture_used_at = millis();
+    return 1;
+}
+
 /* Settle the offset from o0 to o1 over a few frames. */
 static void anim_o(drm_disp_t *d, int o0, int o1)
 {
@@ -5841,7 +5854,7 @@ int main(void)
 
     int menu = 0, prev_press = 0, prev_lock = 0, was_on = 1, down_x = 0, down_y = 0;
     int press_feedback = 0;
-    int dragging = 0, drag_dir = 0, drag_target = 0;
+    int dragging = 0, drag_dir = 0, drag_target = 0, back_drag = 0;
     int scroll_dir = 0, scroll_start = 0;
     int sms_dragging = 0, sms_scroll_start = 0;
     int scroll_inertia = 0, scroll_track_valid = 0;
@@ -5911,7 +5924,7 @@ int main(void)
         if (backlight_is_on() && ext_ok && !g_lock_state) {
             int ext_changed = devui_ext_poll(&ext, now);
             if (ext_changed) {
-                dragging = 0; drag_dir = 0; scroll_dir = 0; sliding = 0; segging = 0;
+                dragging = 0; drag_dir = 0; back_drag = 0; scroll_dir = 0; sliding = 0; segging = 0;
                 scroll_inertia = 0; scroll_track_valid = 0; scroll_v = 0.0f;
                 menu = 0; g_modal = 0; g_sms_open = -1; subpage_close();
                 touch_input_clear_taps(&touch);
@@ -6083,7 +6096,7 @@ int main(void)
                     if (devui_ext_content_point(&ext, tx, ty, &cx, &cy))
                         devui_ext_handle_tap(&ext, cx, cy, now);
             }
-            dragging = 0; drag_dir = 0; scroll_dir = 0; sliding = 0; segging = 0;
+            dragging = 0; drag_dir = 0; back_drag = 0; scroll_dir = 0; sliding = 0; segging = 0;
             scroll_inertia = 0; scroll_track_valid = 0; scroll_v = 0.0f;
         } else if (g_sms_open >= 0) {
             if (pressed && !prev_press) {
@@ -6226,7 +6239,24 @@ int main(void)
                     int qdx = ex - sx, qdy = ey - sy;
                     int qadx = qdx < 0 ? -qdx : qdx;
                     int qady = qdy < 0 ? -qdy : qdy;
-                    if (!g_subpage[0] && g_npages > 1 && qadx >= QUEUED_SWIPE_PX && qadx > qady) {
+                    if (g_subpage[0] && qdx >= W * 30 / 100 && qadx > qady) {
+                        int o_now = W - qdx;
+                        if (o_now < 0) o_now = 0;
+                        if (o_now > W) o_now = W;
+                        scroll_inertia = 0;
+                        scroll_track_valid = 0;
+                        scroll_v = 0.0f;
+                        if (prep_subpage_back(&disp)) {
+                            anim_o(&disp, o_now, 0);
+                            subpage_close();
+                            invalidate_render_html_cache();
+                            need_render = 1;
+                            animating = 1;
+                            last_motion_frame = now;
+                            queued_motion = 1;
+                            touch_input_clear_taps(&touch);
+                        }
+                    } else if (!g_subpage[0] && g_npages > 1 && qadx >= QUEUED_SWIPE_PX && qadx > qady) {
                         int dir = qdx < 0 ? 1 : -1;
                         int target = (g_cur + (dir > 0 ? 1 : g_npages - 1)) % g_npages;
                         int o_now = dir > 0 ? -qdx : (W - qdx);
@@ -6278,7 +6308,7 @@ queued_done:
                     if (touch_input_take_latest_tap(&touch, &tx, &ty)) {
                         x = tx; y = ty;
                         down_x = tx; down_y = ty;
-                        dragging = 1; drag_dir = 0; scroll_dir = 0; scroll_start = g_scroll; sliding = 0; segging = 0;
+                        dragging = 1; drag_dir = 0; back_drag = 0; scroll_dir = 0; scroll_start = g_scroll; sliding = 0; segging = 0;
                         drag_down_ms = now;
                         scroll_inertia = 0;
                         scroll_track_valid = 0;
@@ -6290,7 +6320,7 @@ queued_done:
                 }
             }
             if (pressed && !prev_press) {
-                down_x = x; down_y = y; dragging = 1; drag_dir = 0; scroll_dir = 0; scroll_start = g_scroll; sliding = 0; segging = 0;
+                down_x = x; down_y = y; dragging = 1; drag_dir = 0; back_drag = 0; scroll_dir = 0; scroll_start = g_scroll; sliding = 0; segging = 0;
                 last_motion_frame = 0;
                 drag_down_ms = now;
                 scroll_track_valid = 0; scroll_v = 0.0f;
@@ -6340,7 +6370,16 @@ queued_done:
                 int dx = x - down_x, dy = y - down_y;
                 int adx = dx < 0 ? -dx : dx, ady = dy < 0 ? -dy : dy;
                 if (drag_dir == 0 && scroll_dir == 0) {
-                    if (!g_subpage[0] && g_npages > 1 && adx > DRAG_START_PX && adx > ady) {
+                    if (g_subpage[0] && dx > 0 && adx > DRAG_START_PX && adx > ady) {
+                        if (press_feedback) { restore_fb(&disp); press_feedback = 0; }
+                        back_drag = 1;
+                        drag_dir = -1;
+                        if (!prep_subpage_back(&disp)) {
+                            back_drag = 0;
+                            drag_dir = 0;
+                            dragging = 0;
+                        }
+                    } else if (!g_subpage[0] && g_npages > 1 && adx > DRAG_START_PX && adx > ady) {
                         if (press_feedback) { restore_fb(&disp); press_feedback = 0; }
                         drag_dir = dx < 0 ? 1 : -1;
                         drag_target = (g_cur + (drag_dir > 0 ? 1 : g_npages - 1)) % g_npages;
@@ -6364,7 +6403,8 @@ queued_done:
                             scroll_track_valid = 0;
                             scroll_v = 0.0f;
                         }
-                    } else if (ady > DRAG_CANCEL_PX) dragging = 0;
+                    } else if (ady > DRAG_CANCEL_PX ||
+                               (g_subpage[0] && adx > DRAG_CANCEL_PX && adx > ady)) dragging = 0;
                 }
                 if (drag_dir != 0) {
                     if (motion_frame_due(now, &last_motion_frame)) {
@@ -6425,11 +6465,14 @@ queued_done:
                 }
                 else if (dragging && drag_dir != 0) {            /* finish or snap back */
                     int adx = dx < 0 ? -dx : dx;
-                    int commit = adx > W * 30 / 100;
+                    int commit = back_drag ? dx > W * 30 / 100 : adx > W * 30 / 100;
                     int o_now = drag_dir > 0 ? -dx : (W - dx);
                     if (o_now < 0) o_now = 0; if (o_now > W) o_now = W;
                     anim_o(&disp, o_now, drag_dir > 0 ? (commit ? W : 0) : (commit ? 0 : W));
-                    if (commit) { g_cur = drag_target; g_scroll = 0; }
+                    if (commit) {
+                        if (back_drag) subpage_close();
+                        else { g_cur = drag_target; g_scroll = 0; }
+                    }
                     /* After a page-swipe preview or snap-back, the on-screen pixels no
                      * longer match the cached HTML of the current page. Force a full
                      * re-render so native-drawn content from the neighbor page (for
@@ -6879,7 +6922,7 @@ action_done:
                 if (!replay_release)
                     touch_input_drop_replayed_release(&touch, release_was_tap);
                 last_motion_frame = 0;
-                dragging = 0; drag_dir = 0; scroll_dir = 0; sliding = 0; segging = 0; g_segdrag = 0;
+                dragging = 0; drag_dir = 0; back_drag = 0; scroll_dir = 0; sliding = 0; segging = 0; g_segdrag = 0;
                 scroll_track_valid = 0;
             }
         }
