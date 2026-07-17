@@ -103,7 +103,7 @@ adb shell '/etc/init.d/zte_topsw_devui stop; sleep 1;
 // Remix 聚合 version.json
 { "schema": 1,
   "datad": { "version": "0.6.7-remix.2", "asset": "zwrt-datad-aarch64" },
-  "devui": { "version": "1.2.12-remix.3", "asset": "u60pro-devui-aarch64" },
+  "devui": { "version": "1.2.12-remix.4", "asset": "u60pro-devui-aarch64" },
   "ui":    { "version": "0.4.10-remix.2", "asset": "ui.tar.gz" } }
 ```
 
@@ -123,7 +123,7 @@ https://cdn.jsdelivr.net/gh/scoltzero/u60pro-devui-remix@release-assets/{file}
 bash scripts/build.sh
 bash scripts/package-release.sh \
   --datad ../zwrt-datad/zwrt-datad.stripped \
-  --out dist/v1.2.12-remix.3
+  --out dist/v1.2.12-remix.4
 ```
 
 ## 文档
