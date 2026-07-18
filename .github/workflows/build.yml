@@ -1,0 +1,269 @@
+name: Build u60pro-devui
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      build_ref:
+        description: 'Git ref to build (branch, tag, or SHA)'
+        required: false
+        default: 'main'
+      create_release:
+        description: 'Create a GitHub release with artifacts'
+        required: false
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.build_ref || github.ref }}
+
+      - name: Cache toolchain & deps
+        id: cache-deps
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/aarch64--musl--stable-2025.08-1
+            ~/freetype-musl
+            ~/litehtml-musl
+          key: v1-tc-ft-lh-${{ hashFiles('scripts/_setup_toolchain.sh', 'scripts/_build_freetype.sh', 'scripts/_build_litehtml.sh') }}
+
+      - name: Download aarch64-musl toolchain
+        if: steps.cache-deps.outputs.cache-hit != 'true'
+        run: |
+          cd ~
+          URL="https://toolchains.bootlin.com/downloads/releases/toolchains/aarch64/tarballs/aarch64--musl--stable-2025.08-1.tar.xz"
+          F="bootlin-aarch64-musl.tar.xz"
+          if [ ! -x "$HOME/aarch64--musl--stable-2025.08-1/bin/aarch64-linux-gcc" ]; then
+            echo ">> downloading toolchain..."
+            curl -fL --retry 5 --retry-delay 10 --connect-timeout 30 -C - -o "$F" "$URL"
+            echo ">> extracting..."
+            tar xf "$F"
+            rm -f "$F"
+          fi
+          echo ">> toolchain ready"
+          ~/aarch64--musl--stable-2025.08-1/bin/aarch64-linux-gcc --version | head -1
+
+      - name: Build FreeType static library
+        if: steps.cache-deps.outputs.cache-hit != 'true'
+        run: |
+          if [ -f ~/freetype-musl/lib/libfreetype.a ]; then
+            echo ">> FreeType already built, skipping"
+            exit 0
+          fi
+          cd ~
+          git clone --depth 1 https://github.com/summerKfrost/freetype2.git freetype 2>&1 | tail -3
+          cd freetype
+          echo ">> FreeType source ready: $(ls src/base/ftbase.c >/dev/null 2>&1 && echo OK || echo MISSING)"
+
+          TC="$HOME/aarch64--musl--stable-2025.08-1/bin"
+          CC="$TC/aarch64-linux-gcc"
+          AR="$TC/aarch64-linux-ar"
+          BUILD="$HOME/ft-build"
+          OUT="$HOME/freetype-musl"
+
+          rm -rf "$BUILD" "$OUT"
+          mkdir -p "$BUILD" "$OUT/lib"
+
+          cat > "$BUILD/ftmodule_min.h" <<'EOF'
+          FT_USE_MODULE( FT_Module_Class, autofit_module_class )
+          FT_USE_MODULE( FT_Driver_ClassRec, tt_driver_class )
+          FT_USE_MODULE( FT_Driver_ClassRec, cff_driver_class )
+          FT_USE_MODULE( FT_Module_Class, psaux_module_class )
+          FT_USE_MODULE( FT_Module_Class, psnames_module_class )
+          FT_USE_MODULE( FT_Module_Class, pshinter_module_class )
+          FT_USE_MODULE( FT_Module_Class, sfnt_module_class )
+          FT_USE_MODULE( FT_Renderer_Class, ft_smooth_renderer_class )
+          EOF
+
+          SRCS="base/ftbase base/ftsystem base/ftinit base/ftdebug base/ftbbox \
+                base/ftbitmap base/ftglyph base/ftmm cache/ftcache autofit/autofit \
+                truetype/truetype cff/cff psaux/psaux psnames/psnames \
+                pshinter/pshinter sfnt/sfnt smooth/smooth gzip/ftgzip"
+
+          for s in $SRCS; do
+              o="$BUILD/$(echo "$s" | tr / _).o"
+              "$CC" -O2 -DFT2_BUILD_LIBRARY -I"$HOME/freetype/include" -I"$BUILD" \
+                    -DFT_CONFIG_MODULES_H='"ftmodule_min.h"' \
+                    -c "$HOME/freetype/src/$s.c" -o "$o"
+              echo "  CC $s"
+          done
+
+          "$AR" rcs "$OUT/lib/libfreetype.a" "$BUILD"/*.o
+          cp -r "$HOME/freetype/include" "$OUT/include"
+          echo ">> FreeType OK: $(du -h "$OUT/lib/libfreetype.a" | cut -f1)"
+
+      - name: Build litehtml static library
+        if: steps.cache-deps.outputs.cache-hit != 'true'
+        run: |
+          if [ -f ~/litehtml-musl/lib/liblitehtml.a ]; then
+            echo ">> litehtml already built, skipping"
+            exit 0
+          fi
+          cd ~
+          git clone --depth 1 https://github.com/litehtml/litehtml.git litehtml 2>&1 | tail -3
+
+          TC="$HOME/aarch64--musl--stable-2025.08-1/bin"
+          CXX="$TC/aarch64-linux-g++"
+          CC="$TC/aarch64-linux-gcc"
+          AR="$TC/aarch64-linux-ar"
+          BUILD="$HOME/lh-build"
+          OUT="$HOME/litehtml-musl"
+
+          rm -rf "$BUILD" "$OUT"
+          mkdir -p "$BUILD" "$OUT/lib"
+
+          GUMBO_INC="-I$HOME/litehtml/src/gumbo/include -I$HOME/litehtml/src/gumbo/include/gumbo"
+
+          echo ">> compiling gumbo (C)"
+          for f in "$HOME"/litehtml/src/gumbo/*.c; do
+              "$CC" -O2 -w $GUMBO_INC -c "$f" -o "$BUILD/gumbo_$(basename "$f" .c).o"
+          done
+
+          echo ">> compiling litehtml (C++)"
+          for f in "$HOME"/litehtml/src/*.cpp; do
+              "$CXX" -O2 -std=c++17 -w -I"$HOME/litehtml/include" -I"$HOME/litehtml/include/litehtml" $GUMBO_INC -c "$f" \
+                     -o "$BUILD/lh_$(basename "$f" .cpp).o"
+          done
+
+          "$AR" rcs "$OUT/lib/liblitehtml.a" "$BUILD"/*.o
+          cp -r "$HOME/litehtml/include" "$OUT/include"
+          echo ">> litehtml OK: $(du -h "$OUT/lib/liblitehtml.a" | cut -f1)"
+
+      - name: Build u60pro-devui
+        run: |
+          ROOT="$GITHUB_WORKSPACE"
+          TC="$HOME/aarch64--musl--stable-2025.08-1/bin"
+          CC="$TC/aarch64-linux-gcc"
+          CXX="$TC/aarch64-linux-g++"
+          FT_DIR="$HOME/freetype-musl"
+          LH_DIR="$HOME/litehtml-musl"
+          cd "$ROOT"
+
+          CFLAGS="-std=c11 -Os -ffunction-sections -fdata-sections \
+            -Wall -Wextra -Wno-unused-parameter \
+            -D_GNU_SOURCE -DLV_CONF_INCLUDE_SIMPLE \
+            -I. -Iinclude -Ithird_party/stb -I$FT_DIR/include"
+
+          APP_SRCS="backlight data devui_ext drm_disp json key_input touch_input htmlmain"
+          OBJS=""
+          for s in $APP_SRCS; do
+              obj="/tmp/$(basename "$s").o"
+              $CC $CFLAGS -pthread -c "src/${s}.c" -o "$obj"
+              OBJS="$OBJS $obj"
+              echo "  CC src/${s}.c"
+          done
+
+          CXXFLAGS="-std=c++17 -O2 -w -Iinclude -I$FT_DIR/include -I$LH_DIR/include -I$LH_DIR/include/litehtml -Ithird_party/stb"
+          echo "  CXX src/html_view.cpp"
+          "$CXX" $CXXFLAGS -c src/html_view.cpp -o /tmp/html_view.o
+          OBJS="$OBJS /tmp/html_view.o"
+
+          echo ">> linking..."
+          "$CXX" -static $OBJS "$LH_DIR/lib/liblitehtml.a" "$FT_DIR/lib/libfreetype.a" \
+            -Wl,--gc-sections -pthread -lm -o u60pro-devui
+
+          echo ">> link OK"
+          "$TC/aarch64-linux-size" u60pro-devui
+          "$TC/aarch64-linux-strip" -o u60pro-devui-aarch64 u60pro-devui
+          echo ">> stripped binary:"
+          ls -lh u60pro-devui-aarch64
+
+      - name: Package UI templates
+        run: |
+          cd "$GITHUB_WORKSPACE"
+          # Collect example HTML files as UI templates
+          mkdir -p /tmp/ui-pkg
+          cp -r examples/custom-functions/*.html /tmp/ui-pkg/ 2>/dev/null || true
+          cp -r examples/custom-functions/*.sh /tmp/ui-pkg/ 2>/dev/null || true
+          # Also include any ui/ directory if present
+          if [ -d ui ]; then
+            cp -r ui/*.html /tmp/ui-pkg/ 2>/dev/null || true
+          fi
+          # Create subpages dir
+          mkdir -p /tmp/ui-pkg/subpages /tmp/ui-pkg/functions
+          # Package
+          cd /tmp/ui-pkg
+          tar czf "$GITHUB_WORKSPACE/ui.tar.gz" .
+          echo ">> UI package:"
+          ls -lh "$GITHUB_WORKSPACE/ui.tar.gz"
+
+      - name: Generate version info
+        id: version
+        run: |
+          cd "$GITHUB_WORKSPACE"
+          # Use tag name if triggered by tag, otherwise generate from date
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            VERSION="${GITHUB_REF#refs/tags/}"
+          else
+            VERSION="dev-$(date +%Y%m%d)-$(git rev-parse --short HEAD)"
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+          # Build version.json for the management plugin
+          cat > version-release.json <<EOF
+          {
+            "schema": 1,
+            "devui": {
+              "version": "${VERSION}",
+              "asset": "u60pro-devui-aarch64",
+              "notes": "CI auto-build from $VERSION"
+            },
+            "ui": {
+              "version": "${VERSION}",
+              "asset": "ui.tar.gz"
+            }
+          }
+          EOF
+          echo ">> version: $VERSION"
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: u60pro-devui-${{ steps.version.outputs.version }}
+          path: |
+            u60pro-devui-aarch64
+            ui.tar.gz
+            version-release.json
+          retention-days: 30
+
+      - name: Create GitHub Release
+        if: (startsWith(github.ref, 'refs/tags/v') || github.event.inputs.create_release == 'true') && steps.version.outputs.version != ''
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.version }}
+          name: "u60pro-devui ${{ steps.version.outputs.version }}"
+          body: |
+            ## u60pro-devui ${{ steps.version.outputs.version }}
+
+            **Automated CI build** from commit `${{ github.sha }}`
+
+            ### Assets
+            | File | Description |
+            |------|-------------|
+            | `u60pro-devui-aarch64` | DevUI binary (static, aarch64-musl) |
+            | `ui.tar.gz` | UI template files |
+            | `version-release.json` | Version metadata |
+
+            ### Installation
+            Use the [U60Pro Screen Management Plugin](https://github.com/Zhengjian12345/u60pro-devui-remix) to install directly, or download manually:
+            1. Download `u60pro-devui-aarch64` to `/data/plugins/u60pro-devui/`
+            2. Download `ui.tar.gz` and extract to `/data/plugins/u60pro-devui/ui/`
+            3. `chmod +x /data/plugins/u60pro-devui/u60pro-devui`
+            4. Start: `nohup /data/plugins/u60pro-devui/u60pro-devui >/tmp/u60pro-devui.log 2>&1 &`
+          files: |
+            u60pro-devui-aarch64
+            ui.tar.gz
+            version-release.json
+          draft: false
+          prerelease: ${{ contains(steps.version.outputs.version, 'dev') }}
