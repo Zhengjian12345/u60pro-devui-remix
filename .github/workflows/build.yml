@@ -178,20 +178,50 @@ jobs:
       - name: Package UI templates
         run: |
           cd "$GITHUB_WORKSPACE"
-          # Collect example HTML files as UI templates
-          mkdir -p /tmp/ui-pkg
-          cp -r examples/custom-functions/*.html /tmp/ui-pkg/ 2>/dev/null || true
-          cp -r examples/custom-functions/*.sh /tmp/ui-pkg/ 2>/dev/null || true
-          # Also include any ui/ directory if present
-          if [ -d ui ]; then
-            cp -r ui/*.html /tmp/ui-pkg/ 2>/dev/null || true
-          fi
-          # Create subpages dir
+          rm -rf /tmp/ui-pkg
           mkdir -p /tmp/ui-pkg/subpages /tmp/ui-pkg/functions
-          # Package
+
+          # 1. Core UI pages from ui/ directory
+          if [ -d ui ]; then
+            cp -f ui/*.html /tmp/ui-pkg/ 2>/dev/null || true
+            cp -f ui/*.css /tmp/ui-pkg/ 2>/dev/null || true
+            # Copy subpages (sms, lock, cell, speedtest, wifi etc)
+            if [ -d ui/subpages ]; then
+              cp -af ui/subpages/*.html /tmp/ui-pkg/subpages/ 2>/dev/null || true
+            fi
+          fi
+
+          # 2. Custom function pages (placed in functions/ subdir)
+          #    These are detected by devui and shown as extra pages
+          if [ -d examples/custom-functions ]; then
+            for f in examples/custom-functions/*.html; do
+              [ -f "$f" ] || continue
+              fname=$(basename "$f")
+              cp -f "$f" "/tmp/ui-pkg/functions/$fname"
+            done
+            # Copy companion scripts alongside the HTML
+            for f in examples/custom-functions/*.sh; do
+              [ -f "$f" ] || continue
+              cp -f "$f" /tmp/ui-pkg/functions/
+            done
+          fi
+
+          # Verify critical files exist
+          echo ">> UI package contents:"
+          cd /tmp/ui-pkg && find . -type f | sort
+          echo ""
+          for req in 01-signal.html style.css menu.html; do
+            if [ -f "/tmp/ui-pkg/$req" ]; then
+              echo "  OK: $req"
+            else
+              echo "  MISSING: $req (may cause rendering issues)"
+            fi
+          done
+
+          # Create tar.gz (no leading ./ prefix, flat structure)
           cd /tmp/ui-pkg
-          tar czf "$GITHUB_WORKSPACE/ui.tar.gz" .
-          echo ">> UI package:"
+          tar czf "$GITHUB_WORKSPACE/ui.tar.gz" --transform='s,^\./,,' .
+          echo ">> UI package size:"
           ls -lh "$GITHUB_WORKSPACE/ui.tar.gz"
 
       - name: Generate version info
