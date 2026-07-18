@@ -6,7 +6,7 @@
 
 ### 变更
 
-- **飞猫分身卡切卡**：新增 `act:simswitch:<pin>` 动作和 `fmsimpin.html` 自定义功能页，支持通过 AT+CLCK 命令在移动（0200）、联通（0100）、电信（0300）之间切换飞猫分身卡运营商。PIN 码白名单硬编码在 `htmlmain.c` 动作处理器中，切卡逻辑委托外部控制脚本 `fmsimpin.sh` 异步执行（含 AT 端口自动检测、SIM 就绪等待、网络恢复检测、后台时间校准），操作日志通过 `{{FMSIMACTIONLOG}}` 令牌展示在自定义页面上。
+- **飞猫分身卡切卡**：新增 `act:simswitch:<pin>` 动作和 `fmsimpin.html` 自定义功能页，支持通过 AT+CLCK 命令在移动（0200）、联通（0100）、电信（0300）之间切换飞猫分身卡运营商。切卡页面仅在检测到 FMSimPIN 浏览器插件（`/api/run_shell` 接口可用）时才显示在更多功能页。PIN 码白名单硬编码在 `htmlmain.c` 动作处理器中，切卡逻辑委托 `fmsimpin.sh` 控制脚本通过 `/api/run_shell` API 异步执行（含 AT 端口自动检测、SIM 就绪等待、网络恢复检测、后台时间校准），操作日志通过 `{{FMSIMACTIONLOG}}` 令牌展示在自定义页面上。
 
 ### 文档
 

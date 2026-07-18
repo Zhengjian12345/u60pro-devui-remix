@@ -193,7 +193,7 @@ litehtml 不是浏览器，**限制比较多**，踩坑前先看这里：
 | `act:cpupowersave` `act:cpubalance` `act:cpuperformance` `act:cpuextreme` `act:cpurefresh` | 设置或刷新 CPU 性能模式 |
 | `act:neighbors` | 首页展开 / 收起邻小区列表 |
 | `act:stpage` | 打开测速二级页（只有测速后端存在时更多功能页才显示入口） |
-| `act:simswitch:<pin>` | 切换飞猫分身卡运营商（`0200`=移动 / `0100`=联通 / `0300`=电信），需 `fmsimpin.sh` 控制脚本已部署 |
+| `act:simswitch:<pin>` | 切换飞猫分身卡运营商（`0200`=移动 / `0100`=联通 / `0300`=电信），需设备已安装 FMSimPIN 浏览器插件（`/api/run_shell` 接口可用）且 `fmsimpin.sh` 控制脚本已部署 |
 
 例：一个开关按钮
 

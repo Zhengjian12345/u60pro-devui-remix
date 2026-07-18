@@ -95,13 +95,13 @@ static uint32_t millis(void)
 #define MIHOMO_ACTION_LOG "/tmp/devui-mihomo-action.log"
 #define CPU_CTL UI_DIR "/../cpuctl.sh"
 #define CPU_ACTION_LOG "/tmp/devui-cpu-action.log"
-#define FMSIMPIN_CTL UI_DIR "/../fmsimpin.sh"
 #define FMSIMPIN_ACTION_LOG "/tmp/devui-fmsimpin-action.log"
 
 static uint32_t g_plugin_status_at;
 static int g_ts_installed, g_ts_running, g_ts_connected, g_ts_boot;
 static int g_mh_installed, g_mh_running, g_mh_tun, g_mh_rules;
 static int g_cpu_installed;
+static int g_fmsimpin_available = -1;  /* -1=unchecked, 0=not available, 1=available */
 static char g_ts_pid[16] = "-", g_ts_ip[48] = "-", g_ts_version[32] = "-";
 static char g_ts_host[64] = "-", g_ts_routes[160] = "-";
 static char g_mh_pid[16] = "-", g_mh_version[64] = "-", g_mh_mode[24] = "-";
@@ -849,6 +849,20 @@ static void plugin_action_note(const char *path, const char *text)
     fclose(fp);
 }
 
+/* Check whether the KANO /api/run_shell endpoint is reachable.
+ * Used to gate the FMSimPIN SIM-switch page: it only appears when this
+ * API is available (i.e. the FMSimPIN browser plugin is installed). */
+static void fmsimpin_check_api(void)
+{
+    if (g_fmsimpin_available >= 0) return;  /* already checked */
+    /* Send a trivial safe command and check for HTTP 200. */
+    int rc = system("/usr/bin/wget -q --spider --timeout=3 "
+                    "'http://127.0.0.1/api/run_shell' >/dev/null 2>&1");
+    /* wget returns 0 on success (HTTP 200/3xx).  If the endpoint doesn't
+     * exist the ZTE web server returns 404 and wget exits non-zero. */
+    g_fmsimpin_available = (rc == 0) ? 1 : 0;
+}
+
 static void plugin_action_submit(const char *log_path, const char *runner,
                                  const char *ctl, const char *verb, const char *label)
 {
@@ -1376,7 +1390,7 @@ static int function_control_api_available(const char *name)
     if (!strcmp(name, "cpu-performance.html"))
         return access(CPU_CTL, X_OK) == 0;
     if (!strcmp(name, "fmsimpin.html"))
-        return access(FMSIMPIN_CTL, X_OK) == 0;
+        return g_fmsimpin_available > 0;
     return 1;
 }
 
@@ -6941,15 +6955,21 @@ queued_done:
                             need_render = 1;   /* selection re-syncs from the live lock automatically */
                         }
                         else if (!strncmp(a, "simswitch:", 10)) {
-                            /* 飞猫分身卡切卡：委托 fmsimpin.sh 执行 AT+CLCK */
+                            /* 飞猫分身卡切卡：委托 fmsimpin.sh 通过 /api/run_shell 执行 AT+CLCK */
                             const char *pin = a + 10;
                             /* 白名单：仅允许已知飞猫分身卡 PIN 码 */
                             if (!strcmp(pin, "0200") || !strcmp(pin, "0100") || !strcmp(pin, "0300")) {
                                 char label[16];
-                                if (!strcmp(pin, "0200"))      snprintf(label, sizeof label, "切换移动");
-                                else if (!strcmp(pin, "0100")) snprintf(label, sizeof label, "切换联通");
-                                else                           snprintf(label, sizeof label, "切换电信");
-                                plugin_action_submit(FMSIMPIN_ACTION_LOG, "", FMSIMPIN_CTL, pin, label);
+                                const char *at_cmd;
+                                if (!strcmp(pin, "0200"))      { snprintf(label, sizeof label, "切换移动"); at_cmd = "0200"; }
+                                else if (!strcmp(pin, "0100")) { snprintf(label, sizeof label, "切换联通"); at_cmd = "0100"; }
+                                else                           { snprintf(label, sizeof label, "切换电信"); at_cmd = "0300"; }
+                                /* The control script is bundled alongside the binary.  It
+                                 * calls /api/run_shell (the KANO/FMSimPIN plugin backend)
+                                 * to send AT commands rather than opening AT ports directly. */
+                                char ctl[300];
+                                snprintf(ctl, sizeof ctl, "%s/../fmsimpin.sh", UI_DIR);
+                                plugin_action_submit(FMSIMPIN_ACTION_LOG, "", ctl, at_cmd, label);
                                 snprintf(g_toast, sizeof g_toast, "%s已提交", label);
                                 g_plugin_status_at = 0;
                             } else {
@@ -7032,6 +7052,7 @@ action_done:
 
         if (!g_charge_boot && now - g_pages_scan_at >= 1000) {
             g_pages_scan_at = now;
+            fmsimpin_check_api();
             if (rescan_pages_if_changed()) need_render = 1;
         }
 
