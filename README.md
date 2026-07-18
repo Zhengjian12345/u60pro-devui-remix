@@ -102,9 +102,9 @@ adb shell '/etc/init.d/zte_topsw_devui stop; sleep 1;
 ```jsonc
 // Remix 聚合 version.json
 { "schema": 1,
-  "datad": { "version": "0.6.7-remix.2", "asset": "zwrt-datad-aarch64" },
-  "devui": { "version": "1.2.12-remix.4", "asset": "u60pro-devui-aarch64" },
-  "ui":    { "version": "0.4.10-remix.2", "asset": "ui.tar.gz" } }
+  "datad": { "version": "0.6.7-remix.3", "asset": "zwrt-datad-aarch64" },
+  "devui": { "version": "1.2.12-remix.5", "asset": "u60pro-devui-aarch64" },
+  "ui":    { "version": "0.4.10-remix.3", "asset": "ui.tar.gz" } }
 ```
 
 在原版管理器中选择“自定义源链接”，推荐填写 CDN 资产模板：
@@ -123,7 +123,7 @@ https://cdn.jsdelivr.net/gh/scoltzero/u60pro-devui-remix@release-assets/{file}
 bash scripts/build.sh
 bash scripts/package-release.sh \
   --datad ../zwrt-datad/zwrt-datad.stripped \
-  --out dist/v1.2.12-remix.4
+  --out dist/v1.2.12-remix.5
 ```
 
 ## 文档
