@@ -95,6 +95,8 @@ static uint32_t millis(void)
 #define MIHOMO_ACTION_LOG "/tmp/devui-mihomo-action.log"
 #define CPU_CTL UI_DIR "/../cpuctl.sh"
 #define CPU_ACTION_LOG "/tmp/devui-cpu-action.log"
+#define FMSIMPIN_CTL UI_DIR "/../fmsimpin.sh"
+#define FMSIMPIN_ACTION_LOG "/tmp/devui-fmsimpin-action.log"
 
 static uint32_t g_plugin_status_at;
 static int g_ts_installed, g_ts_running, g_ts_connected, g_ts_boot;
@@ -870,7 +872,8 @@ static int plugin_status_page(const char *path)
     return path && (strstr(path, "/functions/tailscale.html") ||
                     strstr(path, "/functions/clash.html") ||
                     strstr(path, "/functions/mihomo.html") ||
-                    strstr(path, "/functions/cpu-performance.html"));
+                    strstr(path, "/functions/cpu-performance.html") ||
+                    strstr(path, "/functions/fmsimpin.html"));
 }
 
 static void plugin_status_refresh(const char *path, int force)
@@ -1372,6 +1375,8 @@ static int function_control_api_available(const char *name)
         return access(MIHOMO_CTL, X_OK) == 0;
     if (!strcmp(name, "cpu-performance.html"))
         return access(CPU_CTL, X_OK) == 0;
+    if (!strcmp(name, "fmsimpin.html"))
+        return access(FMSIMPIN_CTL, X_OK) == 0;
     return 1;
 }
 
@@ -4672,7 +4677,7 @@ static int build_kv(struct kv *t, const char *path)
     /* ---- band lock: universe grows to the largest set seen; selection mirrors
      * the live lock unless the user is editing in the modal ---- */
     static char s_netseg[640], s_cursa[300], s_curnsa[300], s_curlte[300], s_toast[120];
-    static char s_ts_action_log[2200], s_mh_action_log[2200], s_cpu_action_log[2200];
+    static char s_ts_action_log[2200], s_mh_action_log[2200], s_cpu_action_log[2200], s_fm_action_log[2200];
     if (band_count(d.sa_bands)  >= band_count(g_uni_sa))  snprintf(g_uni_sa,  sizeof g_uni_sa,  "%s", d.sa_bands);
     if (band_count(d.nsa_bands) >= band_count(g_uni_nsa)) snprintf(g_uni_nsa, sizeof g_uni_nsa, "%s", d.nsa_bands);
     if (band_count(d.lte_bands) >= band_count(g_uni_lte)) snprintf(g_uni_lte, sizeof g_uni_lte, "%s", d.lte_bands);
@@ -4988,6 +4993,8 @@ static int build_kv(struct kv *t, const char *path)
     t[i++] = (struct kv){ "CPUMAX", g_cpu_max };
     plugin_action_log_html(s_cpu_action_log, sizeof s_cpu_action_log, CPU_ACTION_LOG);
     t[i++] = (struct kv){ "CPUACTIONLOG", s_cpu_action_log };
+    plugin_action_log_html(s_fm_action_log, sizeof s_fm_action_log, FMSIMPIN_ACTION_LOG);
+    t[i++] = (struct kv){ "FMSIMACTIONLOG", s_fm_action_log };
     return i;
 }
 
@@ -6932,6 +6939,25 @@ queued_done:
                             system("ubus call zte_nwinfo_api nwinfo_reset_band_cell_setting '{}' >/dev/null 2>&1 &");
                             snprintf(g_toast, sizeof g_toast, "锁频已恢复默认"); g_toast_until = now + 1600;
                             need_render = 1;   /* selection re-syncs from the live lock automatically */
+                        }
+                        else if (!strncmp(a, "simswitch:", 10)) {
+                            /* 飞猫分身卡切卡：委托 fmsimpin.sh 执行 AT+CLCK */
+                            const char *pin = a + 10;
+                            /* 白名单：仅允许已知飞猫分身卡 PIN 码 */
+                            if (!strcmp(pin, "0200") || !strcmp(pin, "0100") || !strcmp(pin, "0300")) {
+                                char label[16];
+                                if (!strcmp(pin, "0200"))      snprintf(label, sizeof label, "切换移动");
+                                else if (!strcmp(pin, "0100")) snprintf(label, sizeof label, "切换联通");
+                                else                           snprintf(label, sizeof label, "切换电信");
+                                plugin_action_submit(FMSIMPIN_ACTION_LOG, "", FMSIMPIN_CTL, pin, label);
+                                snprintf(g_toast, sizeof g_toast, "%s已提交", label);
+                                g_plugin_status_at = 0;
+                            } else {
+                                snprintf(g_toast, sizeof g_toast, "不支持的PIN码");
+                            }
+                            g_toast_until = now + 1800;
+                            last_act = now;
+                            need_render = 1;
                         }
                     }
                 }

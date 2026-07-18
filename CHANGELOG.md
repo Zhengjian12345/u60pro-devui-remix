@@ -2,6 +2,16 @@
 
 > 当前正式命名与安装路径已经统一为：`zwrt-datad`、`/data/plugins/zwrt-datad/zwrt-datad`、`/data/plugins/u60pro-devui/`、`/data/plugins/u60pro-devui/ui`。历史条目里如果出现 `u60-datad`、`/data/u60pro` 或 `/data/ui`，表示当时版本记录。
 
+## v1.2.12 - 2026-07-18
+
+### 变更
+
+- **飞猫分身卡切卡**：新增 `act:simswitch:<pin>` 动作和 `fmsimpin.html` 自定义功能页，支持通过 AT+CLCK 命令在移动（0200）、联通（0100）、电信（0300）之间切换飞猫分身卡运营商。PIN 码白名单硬编码在 `htmlmain.c` 动作处理器中，切卡逻辑委托外部控制脚本 `fmsimpin.sh` 异步执行（含 AT 端口自动检测、SIM 就绪等待、网络恢复检测、后台时间校准），操作日志通过 `{{FMSIMACTIONLOG}}` 令牌展示在自定义页面上。
+
+### 文档
+
+- 更新 [`docs/UI-GUIDE.md`](docs/UI-GUIDE.md)，添加 `act:simswitch:<pin>` 动作说明。
+
 ## v1.2.11 - 2026-07-10
 
 ### 修复
