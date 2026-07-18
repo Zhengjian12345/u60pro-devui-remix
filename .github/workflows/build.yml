@@ -36,7 +36,7 @@ jobs:
             ~/aarch64--musl--stable-2025.08-1
             ~/freetype-musl
             ~/litehtml-musl
-          key: v4-tc-ft-lh-${{ hashFiles('scripts/_setup_toolchain.sh', 'scripts/_build_freetype.sh', 'scripts/_build_litehtml.sh') }}
+          key: v5-tc-ft-lh-${{ hashFiles('scripts/_setup_toolchain.sh', 'scripts/_build_freetype.sh', 'scripts/_build_litehtml.sh') }}
 
       - name: Download aarch64-musl toolchain
         if: steps.cache-deps.outputs.cache-hit != 'true'
@@ -106,7 +106,7 @@ jobs:
             exit 0
           fi
           cd ~
-          git clone --depth 1 --branch master https://github.com/litehtml/litehtml.git litehtml 2>&1 | tail -3
+          git clone --depth 100 https://github.com/litehtml/litehtml.git litehtml 2>&1 | tail -3
           cd litehtml && git checkout 09caf8a0169b 2>&1 | tail -3
 
           TC="$HOME/aarch64--musl--stable-2025.08-1/bin"
