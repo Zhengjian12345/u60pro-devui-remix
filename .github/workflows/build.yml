@@ -36,7 +36,7 @@ jobs:
             ~/aarch64--musl--stable-2025.08-1
             ~/freetype-musl
             ~/litehtml-musl
-          key: v1-tc-ft-lh-${{ hashFiles('scripts/_setup_toolchain.sh', 'scripts/_build_freetype.sh', 'scripts/_build_litehtml.sh') }}
+          key: v2-tc-ft-lh-${{ hashFiles('scripts/_setup_toolchain.sh', 'scripts/_build_freetype.sh', 'scripts/_build_litehtml.sh') }}
 
       - name: Download aarch64-musl toolchain
         if: steps.cache-deps.outputs.cache-hit != 'true'
@@ -62,7 +62,7 @@ jobs:
             exit 0
           fi
           cd ~
-          git clone --depth 1 https://github.com/summerKfrost/freetype2.git freetype 2>&1 | tail -3
+          git clone --depth 1 --branch VER-2-13-3 https://github.com/freetype/freetype.git freetype 2>&1 | tail -3
           cd freetype
           echo ">> FreeType source ready: $(ls src/base/ftbase.c >/dev/null 2>&1 && echo OK || echo MISSING)"
 
@@ -75,27 +75,22 @@ jobs:
           rm -rf "$BUILD" "$OUT"
           mkdir -p "$BUILD" "$OUT/lib"
 
-          cat > "$BUILD/ftmodule_min.h" <<'EOF'
-          FT_USE_MODULE( FT_Module_Class, autofit_module_class )
-          FT_USE_MODULE( FT_Driver_ClassRec, tt_driver_class )
-          FT_USE_MODULE( FT_Driver_ClassRec, cff_driver_class )
-          FT_USE_MODULE( FT_Module_Class, psaux_module_class )
-          FT_USE_MODULE( FT_Module_Class, psnames_module_class )
-          FT_USE_MODULE( FT_Module_Class, pshinter_module_class )
-          FT_USE_MODULE( FT_Module_Class, sfnt_module_class )
-          FT_USE_MODULE( FT_Renderer_Class, ft_smooth_renderer_class )
-          EOF
+          printf '%s\n' \
+            'FT_USE_MODULE( FT_Module_Class, autofit_module_class )' \
+            'FT_USE_MODULE( FT_Driver_ClassRec, tt_driver_class )' \
+            'FT_USE_MODULE( FT_Driver_ClassRec, cff_driver_class )' \
+            'FT_USE_MODULE( FT_Module_Class, psaux_module_class )' \
+            'FT_USE_MODULE( FT_Module_Class, psnames_module_class )' \
+            'FT_USE_MODULE( FT_Module_Class, pshinter_module_class )' \
+            'FT_USE_MODULE( FT_Module_Class, sfnt_module_class )' \
+            'FT_USE_MODULE( FT_Renderer_Class, ft_smooth_renderer_class )' \
+            > "$BUILD/ftmodule_min.h"
 
-          SRCS="base/ftbase base/ftsystem base/ftinit base/ftdebug base/ftbbox \
-                base/ftbitmap base/ftglyph base/ftmm cache/ftcache autofit/autofit \
-                truetype/truetype cff/cff psaux/psaux psnames/psnames \
-                pshinter/pshinter sfnt/sfnt smooth/smooth gzip/ftgzip"
+          SRCS="base/ftbase base/ftsystem base/ftinit base/ftdebug base/ftbbox base/ftbitmap base/ftglyph base/ftmm cache/ftcache autofit/autofit truetype/truetype cff/cff psaux/psaux psnames/psnames pshinter/pshinter sfnt/sfnt smooth/smooth gzip/ftgzip"
 
           for s in $SRCS; do
               o="$BUILD/$(echo "$s" | tr / _).o"
-              "$CC" -O2 -DFT2_BUILD_LIBRARY -I"$HOME/freetype/include" -I"$BUILD" \
-                    -DFT_CONFIG_MODULES_H='"ftmodule_min.h"' \
-                    -c "$HOME/freetype/src/$s.c" -o "$o"
+              "$CC" -O2 -DFT2_BUILD_LIBRARY -I"$HOME/freetype/include" -I"$BUILD" -DFT_CONFIG_MODULES_H='"ftmodule_min.h"' -c "$HOME/freetype/src/$s.c" -o "$o"
               echo "  CC $s"
           done
 
