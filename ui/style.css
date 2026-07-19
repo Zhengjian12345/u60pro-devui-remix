@@ -219,6 +219,7 @@ body.dark  .seg { background: #2c2f37; }
 body.light .seg { background: #d3d9e2; }
 .segc { display: table-cell; text-align: center; font-size: 15px; padding: 12px 0;
         text-decoration: none; white-space: nowrap; }
+.seg2 .segc { width: 50%; }
 .seg4 .segc { width: 25%; }            /* explicit widths = equal cells */
 .seg5 .segc { width: 20%; font-size: 13px; padding: 11px 0; }
 .seg6 { margin-top: 5px; }
@@ -226,6 +227,12 @@ body.light .seg { background: #d3d9e2; }
 body.dark  .segc { color: #cfd4dc; }
 body.light .segc { color: #2a2f38; }
 .segc.seg-on { background: #2f6fe0; color: #fff; font-weight: 700; }
+.simseg .segc { height: 31px; vertical-align: middle; padding: 7px 0; }
+.simseg .sim-main { font-size: 14px; font-weight: 700; }
+.simseg .sim-sub { font-size: 10px; line-height: 11px; }
+.simseg .segc.sim-armed { background: #ad711c; color: #fff; }
+.simseg .segc.sim-busy { background: #ad711c; color: #fff; font-weight: 700; }
+.simhint { margin-top: 7px; color: #718196; font-size: 11px; line-height: 15px; }
 
 /* lock summary cards (whole card tappable) */
 .card.lockcard { display: block; text-decoration: none; }
