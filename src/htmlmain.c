@@ -83,7 +83,9 @@ static void        maybe_dump_fb(drm_disp_t *d);
 static volatile sig_atomic_t g_run = 1;
 static volatile int g_ui_awake = 1;
 static void on_sig(int s) { (void)s; g_run = 0; }
-
+/* === 飞猫分身切卡插件 - 前置声明 === */
+static void refresh_fmswitch_status(void);
+static int handle_fmswitch(const char *arg, uint32_t now);
 static uint32_t millis(void)
 {
     struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
@@ -1536,7 +1538,7 @@ static void plugin_status_refresh(const char *path, int force)
     else if (plugin_page_named(path, "operator-lock.html")) refresh_operator_status();
     else if (plugin_page_named(path, "fmswitch.html")) refresh_fmswitch_status();
 }
-static void refresh_fmswitch_status(void);
+static void refresh_fmswitch_status(void)
 {
     FILE *fp;
     char line[256], cmd[512];
@@ -6906,7 +6908,7 @@ static void screen_off(drm_disp_t *d)
     memset(d->fb, 0, (size_t)d->pitch_px * d->height * sizeof(uint16_t));
     drm_disp_dirty(d, 0, 0, d->width - 1, d->height - 1);
 }
-			static int handle_fmswitch(const char *arg, uint32_t now)
+static int handle_fmswitch(const char *arg, uint32_t now)
 /* Screen on: render, then "warm up" the command-mode panel with several frame
  * pushes while the backlight is still 0; this drives it past the idle-exit
  * transient invisibly, then fades the backlight up from 0. */
