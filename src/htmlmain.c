@@ -6897,80 +6897,6 @@ static void set_bright_x(int x, int bx, int bw)
 
 /* Screen off: fade backlight down (content still shown) then blank the fb. */
 static void screen_off(drm_disp_t *d)
-static int handle_fmswitch(const char *arg, uint32_t now)
-{
-    char cmd[768], label[32] = "";
-    const char *pin = arg;
-
-    if (!g_fm_installed) {
-        snprintf(g_toast, sizeof g_toast, "未安装 fmsimpin.sh");
-        g_toast_until = now + 2000;
-        return 0;
-    }
-
-    if (!strcmp(pin, "unlock")) {
-        snprintf(cmd, sizeof cmd, "sh '%s' unlock >>'%s' 2>&1 &", FMSIMPIN_SCRIPT, FMSWITCH_ACTION_LOG);
-        plugin_action_note(FMSWITCH_ACTION_LOG, "解除 SIM PIN 锁定");
-        system(cmd);
-        snprintf(g_toast, sizeof g_toast, "正在解除 PIN 锁定...");
-        g_toast_until = now + 2000;
-        return 1;
-    }
-
-    if (!strcmp(pin, "rescan")) {
-        snprintf(cmd, sizeof cmd, "sh '%s' rescan >>'%s' 2>&1 &", FMSIMPIN_SCRIPT, FMSWITCH_ACTION_LOG);
-        plugin_action_note(FMSWITCH_ACTION_LOG, "重新搜索网络");
-        system(cmd);
-        snprintf(g_toast, sizeof g_toast, "正在重新搜网...");
-        g_toast_until = now + 2000;
-        return 1;
-    }
-
-    if (!strcmp(pin, "imsi")) {
-        snprintf(cmd, sizeof cmd, "sh '%s' imsi >>'%s' 2>&1 &", FMSIMPIN_SCRIPT, FMSWITCH_ACTION_LOG);
-        plugin_action_note(FMSWITCH_ACTION_LOG, "查询 IMSI");
-        system(cmd);
-        snprintf(g_toast, sizeof g_toast, "正在查询 IMSI...");
-        g_toast_until = now + 2000;
-        return 1;
-    }
-
-    /* 切卡操作 */
-    if (!strcmp(pin, "0100")) snprintf(label, sizeof label, "联通");
-    else if (!strcmp(pin, "0200")) snprintf(label, sizeof label, "移动");
-    else if (!strcmp(pin, "0300")) snprintf(label, sizeof label, "电信");
-    else {
-        snprintf(g_toast, sizeof g_toast, "未知 PIN 码");
-        g_toast_until = now + 2000;
-        return 0;
-    }
-
-    if (g_fm_cooldown) {
-        snprintf(g_toast, sizeof g_toast, "冷却中，请稍后再试");
-        g_toast_until = now + 2000;
-        return 0;
-    }
-
-    g_fm_cooldown_until = now + FM_COOLDOWN_SEC * 1000U;
-    g_fm_cooldown = 1;
-
-    snprintf(cmd, sizeof cmd,
-             "nohup sh -c 'export TZ=CST-8; log=\"%s\"; tmp=\"${log}.out.$$\"; "
-             "printf \"[%%s] 开始切卡到 %s (PIN: %s)\\n\" \"$(date \"+%%F %%T\")\" >>\"$log\"; "
-             "sh \"%s\" switch %s \"%s\" >\"$tmp\" 2>&1; rc=$?; "
-             "while IFS= read -r line || [ -n \"$line\" ]; do "
-             "printf \"[%%s] %%s\\n\" \"$(date \"+%%F %%T\")\" \"$line\"; done <\"$tmp\" >>\"$log\"; "
-             "rm -f \"$tmp\"; printf \"[%%s] 切卡完成，退出码 %%s\\n\" "
-             "\"$(date \"+%%F %%T\")\" \"$rc\" >>\"$log\"; "
-             "tail -n 30 \"$log\" >\"$log.trim\" && mv \"$log.trim\" \"$log\"; exit \"$rc\"' "
-             ">/dev/null 2>&1 &",
-             FMSWITCH_ACTION_LOG, label, pin, FMSIMPIN_SCRIPT, pin, label);
-    system(cmd);
-
-    snprintf(g_toast, sizeof g_toast, "正在切卡到 %s...", label);
-    g_toast_until = now + 3000;
-    return 1;
-}
 {
     backlight_fade_off();
     g_ui_awake = 0;
@@ -7072,14 +6998,14 @@ static int handle_fmswitch(const char *arg, uint32_t now)
     g_fm_cooldown = 1;
 
     snprintf(cmd, sizeof cmd,
-             "nohup sh -c 'export TZ=CST-8; log=\"%s\"; tmp=\"${log}.out.$$\"; "
-             "printf \"[%%s] 开始切卡到 %s (PIN: %s)\\n\" \"$(date \"+%%F %%T\")\" >>\"$log\"; "
-             "sh \"%s\" switch %s \"%s\" >\"$tmp\" 2>&1; rc=$?; "
-             "while IFS= read -r line || [ -n \"$line\" ]; do "
-             "printf \"[%%s] %%s\\n\" \"$(date \"+%%F %%T\")\" \"$line\"; done <\"$tmp\" >>\"$log\"; "
-             "rm -f \"$tmp\"; printf \"[%%s] 切卡完成，退出码 %%s\\n\" "
-             "\"$(date \"+%%F %%T\")\" \"$rc\" >>\"$log\"; "
-             "tail -n 30 \"$log\" >\"$log.trim\" && mv \"$log.trim\" \"$log\"; exit \"$rc\"' "
+             "nohup sh -c 'export TZ=CST-8; log="%s"; tmp="${log}.out.$$"; "
+             "printf "[%%s] 开始切卡到 %s (PIN: %s)\n" "$(date "+%%F %%T")" >>"$log"; "
+             "sh "%s" switch %s "%s" >"$tmp" 2>&1; rc=$?; "
+             "while IFS= read -r line || [ -n "$line" ]; do "
+             "printf "[%%s] %%s\n" "$(date "+%%F %%T")" "$line"; done <"$tmp" >>"$log"; "
+             "rm -f "$tmp"; printf "[%%s] 切卡完成，退出码 %%s\n" "
+             ""$(date "+%%F %%T")" "$rc" >>"$log"; "
+             "tail -n 30 "$log" >"$log.trim" && mv "$log.trim" "$log"; exit "$rc"' "
              ">/dev/null 2>&1 &",
              FMSWITCH_ACTION_LOG, label, pin, FMSIMPIN_SCRIPT, pin, label);
     system(cmd);
@@ -7426,7 +7352,41 @@ int main(void)
                             render_sms_overlay(&disp, 1);
                             animating = 1;
                         }
-                    
+                    }
+                } else {
+                    int tx, ty;
+                    if (touch_input_take_latest_tap(&touch, &tx, &ty)) {
+                        const char *act = html_view_click((float)tx, (float)ty);
+                        if (!strcmp(act, "act:smsclose")) {
+                            sms_close(&touch, &need_render);
+                        }
+                    }
+                }
+            }
+        } else if (g_modal) {
+            /* second-level band-lock dialog: tap only (level-1 is disabled) */
+            if (pressed && !prev_press) {
+                down_x = x;
+                down_y = y;
+            } else if (!pressed && prev_press) {
+                int mdx = x - down_x, mdy = y - down_y;
+                int modal_was_tap = mdx * mdx + mdy * mdy <= 14 * 14;
+                if (modal_was_tap)
+                    handle_modal_tap(&disp, x, y, now, &need_render, &animating);
+                /* The renderer has already handled this release. Remove its matching
+                 * queue entries before a closed modal exposes the button underneath. */
+                touch_input_drop_replayed_release(&touch, modal_was_tap);
+            } else if (!pressed) {
+                int sx, sy, ex, ey, tx, ty;
+                int have_stroke = touch_input_take_latest_stroke(&touch, &sx, &sy, &ex, &ey);
+                int have_tap = touch_input_take_latest_tap(&touch, &tx, &ty);
+                if (have_tap && (!have_stroke ||
+                    (ex - sx) * (ex - sx) + (ey - sy) * (ey - sy) <= 14 * 14))
+                    handle_modal_tap(&disp, tx, ty, now, &need_render, &animating);
+            }
+
+
+
         } else {
             int maxs = g_page_h > H ? g_page_h - H : 0;
             if (pressed && scroll_inertia) {
