@@ -1532,6 +1532,7 @@ static void plugin_status_refresh(const char *path, int force)
 
     if (!plugin_status_page(path)) return;
     if (!force && g_plugin_status_at && now - g_plugin_status_at < interval) return;
+        }
     g_plugin_status_at = now;
     if (plugin_page_named(path, "tailscale.html")) refresh_tailscale_status();
     else if (plugin_page_named(path, "clash.html") || plugin_page_named(path, "mihomo.html")) refresh_mihomo_status();
