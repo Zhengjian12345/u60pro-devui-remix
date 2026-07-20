@@ -6897,6 +6897,80 @@ static void set_bright_x(int x, int bx, int bw)
 
 /* Screen off: fade backlight down (content still shown) then blank the fb. */
 static void screen_off(drm_disp_t *d)
+static int handle_fmswitch(const char *arg, uint32_t now)
+{
+    char cmd[768], label[32] = "";
+    const char *pin = arg;
+
+    if (!g_fm_installed) {
+        snprintf(g_toast, sizeof g_toast, "未安装 fmsimpin.sh");
+        g_toast_until = now + 2000;
+        return 0;
+    }
+
+    if (!strcmp(pin, "unlock")) {
+        snprintf(cmd, sizeof cmd, "sh '%s' unlock >>'%s' 2>&1 &", FMSIMPIN_SCRIPT, FMSWITCH_ACTION_LOG);
+        plugin_action_note(FMSWITCH_ACTION_LOG, "解除 SIM PIN 锁定");
+        system(cmd);
+        snprintf(g_toast, sizeof g_toast, "正在解除 PIN 锁定...");
+        g_toast_until = now + 2000;
+        return 1;
+    }
+
+    if (!strcmp(pin, "rescan")) {
+        snprintf(cmd, sizeof cmd, "sh '%s' rescan >>'%s' 2>&1 &", FMSIMPIN_SCRIPT, FMSWITCH_ACTION_LOG);
+        plugin_action_note(FMSWITCH_ACTION_LOG, "重新搜索网络");
+        system(cmd);
+        snprintf(g_toast, sizeof g_toast, "正在重新搜网...");
+        g_toast_until = now + 2000;
+        return 1;
+    }
+
+    if (!strcmp(pin, "imsi")) {
+        snprintf(cmd, sizeof cmd, "sh '%s' imsi >>'%s' 2>&1 &", FMSIMPIN_SCRIPT, FMSWITCH_ACTION_LOG);
+        plugin_action_note(FMSWITCH_ACTION_LOG, "查询 IMSI");
+        system(cmd);
+        snprintf(g_toast, sizeof g_toast, "正在查询 IMSI...");
+        g_toast_until = now + 2000;
+        return 1;
+    }
+
+    /* 切卡操作 */
+    if (!strcmp(pin, "0100")) snprintf(label, sizeof label, "联通");
+    else if (!strcmp(pin, "0200")) snprintf(label, sizeof label, "移动");
+    else if (!strcmp(pin, "0300")) snprintf(label, sizeof label, "电信");
+    else {
+        snprintf(g_toast, sizeof g_toast, "未知 PIN 码");
+        g_toast_until = now + 2000;
+        return 0;
+    }
+
+    if (g_fm_cooldown) {
+        snprintf(g_toast, sizeof g_toast, "冷却中，请稍后再试");
+        g_toast_until = now + 2000;
+        return 0;
+    }
+
+    g_fm_cooldown_until = now + FM_COOLDOWN_SEC * 1000U;
+    g_fm_cooldown = 1;
+
+    snprintf(cmd, sizeof cmd,
+             "nohup sh -c 'export TZ=CST-8; log=\"%s\"; tmp=\"${log}.out.$$\"; "
+             "printf \"[%%s] 开始切卡到 %s (PIN: %s)\\n\" \"$(date \"+%%F %%T\")\" >>\"$log\"; "
+             "sh \"%s\" switch %s \"%s\" >\"$tmp\" 2>&1; rc=$?; "
+             "while IFS= read -r line || [ -n \"$line\" ]; do "
+             "printf \"[%%s] %%s\\n\" \"$(date \"+%%F %%T\")\" \"$line\"; done <\"$tmp\" >>\"$log\"; "
+             "rm -f \"$tmp\"; printf \"[%%s] 切卡完成，退出码 %%s\\n\" "
+             "\"$(date \"+%%F %%T\")\" \"$rc\" >>\"$log\"; "
+             "tail -n 30 \"$log\" >\"$log.trim\" && mv \"$log.trim\" \"$log\"; exit \"$rc\"' "
+             ">/dev/null 2>&1 &",
+             FMSWITCH_ACTION_LOG, label, pin, FMSIMPIN_SCRIPT, pin, label);
+    system(cmd);
+
+    snprintf(g_toast, sizeof g_toast, "正在切卡到 %s...", label);
+    g_toast_until = now + 3000;
+    return 1;
+}
 {
     backlight_fade_off();
     g_ui_awake = 0;
@@ -6908,7 +6982,6 @@ static void screen_off(drm_disp_t *d)
     memset(d->fb, 0, (size_t)d->pitch_px * d->height * sizeof(uint16_t));
     drm_disp_dirty(d, 0, 0, d->width - 1, d->height - 1);
 }
-static int handle_fmswitch(const char *arg, uint32_t now)
 /* Screen on: render, then "warm up" the command-mode panel with several frame
  * pushes while the backlight is still 0; this drives it past the idle-exit
  * transient invisibly, then fades the backlight up from 0. */
