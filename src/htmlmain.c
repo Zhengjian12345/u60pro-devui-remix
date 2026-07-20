@@ -6906,6 +6906,7 @@ static void screen_off(drm_disp_t *d)
     memset(d->fb, 0, (size_t)d->pitch_px * d->height * sizeof(uint16_t));
     drm_disp_dirty(d, 0, 0, d->width - 1, d->height - 1);
 }
+			static int handle_fmswitch(const char *arg, uint32_t now)
 /* Screen on: render, then "warm up" the command-mode panel with several frame
  * pushes while the backlight is still 0; this drives it past the idle-exit
  * transient invisibly, then fades the backlight up from 0. */
@@ -6937,7 +6938,7 @@ static void screen_on_ext(drm_disp_t *d, devui_ext_t *ext)
     }
     backlight_fade_on();
 }
-
+static int handle_fmswitch(const char *arg, uint32_t now);
 int main(void)
 {
     signal(SIGINT, on_sig);
@@ -7307,7 +7308,7 @@ int main(void)
                     (ex - sx) * (ex - sx) + (ey - sy) * (ey - sy) <= 14 * 14))
                     handle_modal_tap(&disp, tx, ty, now, &need_render, &animating);
             }
-			static int handle_fmswitch(const char *arg, uint32_t now)
+
 {
     char cmd[768], label[32] = "";
     const char *pin = arg;
