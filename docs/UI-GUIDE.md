@@ -117,6 +117,7 @@ litehtml 不是浏览器，**限制比较多**，踩坑前先看这里：
 | `{{PINDOTS}}` | 锁屏键盘的 4 个 PIN 圆点（已输入的高亮，整段） |
 | `{{LOCKMSG}}` | 解锁错误时的居中「密码错误」红色气泡（无错误为空，整段） |
 | `{{LOCKAUX}}` | 锁屏键盘左下角辅助键：设置 PIN 时为「取消」键，解锁时为空 |
+| `{{SIMSWITCH}}` | 双卡设备的自插卡/内置卡切换区域；单卡设备为空 |
 
 > 信号格条已并入 `{{STATUSBAR}}`；锁频的频段芯片由程序在二级弹窗里生成，页面只需用 `{{CURSA}}/{{CURNSA}}/{{CURLTE}}` 显示当前锁定摘要。
 
@@ -180,6 +181,7 @@ litehtml 不是浏览器，**限制比较多**，踩坑前先看这里：
 | `act:bsa:<频段>` `act:bnsa:<n>` `act:blte:<n>` | 在弹窗里勾选/取消某频段（仅本地缓存） |
 | `act:mall` `act:minv` `act:mapply` | 弹窗：全选/全不选 · 反选 · 应用（应用才提交锁频） |
 | `act:resetband` | 解锁所有频段并恢复默认 |
+| `act:simslot:1` `act:simslot:2` | 双卡设备切换到自插卡/内置卡；需在 4 秒内再次点击同一目标确认 |
 | `act:locktoggle` | 锁屏开关：关→开进入 PIN 设置键盘；开→关清除密码、关闭锁屏 |
 | `act:pin:<0-9>` | 锁屏键盘按下一位数字（满 4 位自动校验/保存） |
 | `act:pin:del` | 锁屏键盘删除最后一位 |
@@ -193,7 +195,6 @@ litehtml 不是浏览器，**限制比较多**，踩坑前先看这里：
 | `act:cpupowersave` `act:cpubalance` `act:cpuperformance` `act:cpuextreme` `act:cpurefresh` | 设置或刷新 CPU 性能模式 |
 | `act:neighbors` | 首页展开 / 收起邻小区列表 |
 | `act:stpage` | 打开测速二级页（只有测速后端存在时更多功能页才显示入口） |
-| `act:simswitch:<pin>` | 切换飞猫分身卡运营商（`0200`=移动 / `0100`=联通 / `0300`=电信），需设备已安装 FMSimPIN 浏览器插件（`/api/run_shell` 接口可用）且 `fmsimpin.sh` 控制脚本已部署 |
 
 例：一个开关按钮
 
