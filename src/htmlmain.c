@@ -107,6 +107,7 @@ static uint32_t monotonic_seconds(void)
 #define CPU_CTL_LEGACY  UI_DIR "/../cpuctl.sh"
 #define CPU_CTL_OLD     "/data/ufi-tools/u60pro-devui/cpuctl.sh"
 #define CPU_ACTION_LOG "/tmp/devui-cpu-action.log"
+#define FMSIMPIN_ACTION_LOG "/tmp/devui-fmsimpin-action.log"
 
 struct plugin_candidate {
     const char *dir;
@@ -213,6 +214,8 @@ static char g_op_rat_pref[16] = "auto", g_op_failure_policy[24] = "stay_offline"
 static char g_op_selected[8];
 static uint32_t g_op_confirm_until;
 static struct operator_candidate_state g_op_scan[OP_MAX_CANDIDATES];
+
+static int g_fmsimpin_available = -1;  /* -1=unchecked, 0=not available, 1=available */
 
 static const char *cpu_ctl_path(void)
 {
@@ -1130,6 +1133,20 @@ static void plugin_action_note(const char *path, const char *text)
     fclose(fp);
 }
 
+/* Check whether the KANO /api/run_shell endpoint is reachable.
+ * Used to gate the FMSimPIN SIM-switch page: it only appears when this
+ * API is available (i.e. the FMSimPIN browser plugin is installed). */
+static void fmsimpin_check_api(void)
+{
+    if (g_fmsimpin_available >= 0) return;  /* already checked */
+    /* Send a trivial safe command and check for HTTP 200. */
+    int rc = system("/usr/bin/wget -q --spider --timeout=3 "
+                    "'http://127.0.0.1/api/run_shell' >/dev/null 2>&1");
+    /* wget returns 0 on success (HTTP 200/3xx).  If the endpoint doesn't
+     * exist the ZTE web server returns 404 and wget exits non-zero. */
+    g_fmsimpin_available = (rc == 0) ? 1 : 0;
+}
+
 static void plugin_action_submit(const char *log_path, const char *runner,
                                  const char *ctl, const char *verb, const char *label)
 {
@@ -1515,6 +1532,7 @@ static void plugin_status_refresh(const char *path, int force)
 
     if (!plugin_status_page(path)) return;
     if (!force && g_plugin_status_at && now - g_plugin_status_at < interval) return;
+        }
     g_plugin_status_at = now;
     if (plugin_page_named(path, "tailscale.html")) refresh_tailscale_status();
     else if (plugin_page_named(path, "clash.html") || plugin_page_named(path, "mihomo.html")) refresh_mihomo_status();
@@ -1995,11 +2013,15 @@ static int function_control_api_available(const char *name)
         return plugin_complete_select(g_wg_candidates, ARRAY_LEN(g_wg_candidates)) != NULL;
     if (!strcmp(name, "operator-lock.html"))
         return operator_complete_select() != NULL;
+    if (!strcmp(name, "fmsimpin.html"))
+        return g_fmsimpin_available > 0;
     return 1;
 }
 
 static int subpage_open(const char *name)
 {
+    if (!strcmp(name, "fmsimpin.html"))
+        fmsimpin_check_api();
     char path[300];
     if (!subpage_name_ok(name)) return 0;
     snprintf(path, sizeof path, "%s/subpages/%s", UI_DIR, name);
@@ -5631,7 +5653,7 @@ static int build_kv(struct kv *t, const char *path)
     /* ---- band lock: universe grows to the largest set seen; selection mirrors
      * the live lock unless the user is editing in the modal ---- */
     static char s_netseg[640], s_simswitch[1200], s_cursa[300], s_curnsa[300], s_curlte[300], s_toast[120];
-    static char s_ts_action_log[2200], s_mh_action_log[2200], s_cpu_action_log[2200];
+    static char s_ts_action_log[2200], s_mh_action_log[2200], s_cpu_action_log[2200], s_fm_action_log[2200];
     static char s_wg_action_log[2200], s_op_action_log[2200];
     static char s_wg_peers[24], s_wg_active[24], s_op_selected[16], s_op_job[440];
     static char s_wg_iface[80], s_wg_address[220], s_wg_port[48], s_wg_mode[64];
@@ -6034,6 +6056,8 @@ static int build_kv(struct kv *t, const char *path)
     t[i++] = (struct kv){ "OPCANCELCLASS", g_op_job_running ? "" : "disabled" };
     plugin_action_log_html(s_op_action_log, sizeof s_op_action_log, OPERATOR_ACTION_LOG);
     t[i++] = (struct kv){ "OPACTIONLOG", s_op_action_log };
+    plugin_action_log_html(s_fm_action_log, sizeof s_fm_action_log, FMSIMPIN_ACTION_LOG);
+    t[i++] = (struct kv){ "FMSIMACTIONLOG", s_fm_action_log };
     return i;
 }
 
@@ -8063,6 +8087,31 @@ queued_done:
                             system("ubus call zte_nwinfo_api nwinfo_reset_band_cell_setting '{}' >/dev/null 2>&1 &");
                             snprintf(g_toast, sizeof g_toast, "锁频已恢复默认"); g_toast_until = now + 1600;
                             need_render = 1;   /* selection re-syncs from the live lock automatically */
+                        }
+                        else if (!strncmp(a, "simswitch:", 10)) {
+                            /* 飞猫分身卡切卡：委托 fmsimpin.sh 通过 /api/run_shell 执行 AT+CLCK */
+                            const char *pin = a + 10;
+                            /* 白名单：仅允许已知飞猫分身卡 PIN 码 */
+                            if (!strcmp(pin, "0200") || !strcmp(pin, "0100") || !strcmp(pin, "0300")) {
+                                char label[16];
+                                const char *at_cmd;
+                                if (!strcmp(pin, "0200"))      { snprintf(label, sizeof label, "切换移动"); at_cmd = "0200"; }
+                                else if (!strcmp(pin, "0100")) { snprintf(label, sizeof label, "切换联通"); at_cmd = "0100"; }
+                                else                           { snprintf(label, sizeof label, "切换电信"); at_cmd = "0300"; }
+                                /* The control script is bundled alongside the binary.  It
+                                 * calls /api/run_shell (the KANO/FMSimPIN plugin backend)
+                                 * to send AT commands rather than opening AT ports directly. */
+                                char ctl[300];
+                                snprintf(ctl, sizeof ctl, "%s/../fmsimpin.sh", UI_DIR);
+                                plugin_action_submit(FMSIMPIN_ACTION_LOG, "", ctl, at_cmd, label);
+                                snprintf(g_toast, sizeof g_toast, "%s已提交", label);
+                                g_plugin_status_at = 0;
+                            } else {
+                                snprintf(g_toast, sizeof g_toast, "不支持的PIN码");
+                            }
+                            g_toast_until = now + 1800;
+                            last_act = now;
+                            need_render = 1;
                         }
                     }
                 }
