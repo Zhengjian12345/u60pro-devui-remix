@@ -8088,22 +8088,36 @@ queued_done:
                             need_render = 1;   /* selection re-syncs from the live lock automatically */
                         }
                         else if (!strncmp(a, "simswitch:", 10)) {
-                            /* 飞猫分身卡切卡：委托 fmsimpin.sh 通过 /api/run_shell 执行 AT+CLCK */
+                            /* 飞猫分身卡切卡：直接发送 AT+CLCK 命令（无需插件） */
                             const char *pin = a + 10;
                             /* 白名单：仅允许已知飞猫分身卡 PIN 码 */
                             if (!strcmp(pin, "0200") || !strcmp(pin, "0100") || !strcmp(pin, "0300")) {
-                                char label[16];
-                                const char *at_cmd;
-                                if (!strcmp(pin, "0200"))      { snprintf(label, sizeof label, "切换移动"); at_cmd = "0200"; }
-                                else if (!strcmp(pin, "0100")) { snprintf(label, sizeof label, "切换联通"); at_cmd = "0100"; }
-                                else                           { snprintf(label, sizeof label, "切换电信"); at_cmd = "0300"; }
-                                /* The control script is bundled alongside the binary.  It
-                                 * calls /api/run_shell (the KANO/FMSimPIN plugin backend)
-                                 * to send AT commands rather than opening AT ports directly. */
-                                char ctl[300];
-                                snprintf(ctl, sizeof ctl, "%s/../fmsimpin.sh", UI_DIR);
-                                plugin_action_submit(FMSIMPIN_ACTION_LOG, "", ctl, at_cmd, label);
-                                snprintf(g_toast, sizeof g_toast, "%s已提交", label);
+                                const char *carrier;
+                                if (!strcmp(pin, "0200"))      carrier = "移动";
+                                else if (!strcmp(pin, "0100")) carrier = "联通";
+                                else                           carrier = "电信";
+                                /* 直接通过 shell 发送 AT 命令到第一个可用的 AT 端口 */
+                                char cmd[1024];
+                                snprintf(cmd, sizeof cmd,
+                                    "sh -c '"
+                                    "log=\"" FMSIMPIN_ACTION_LOG "\";"
+                                    "printf \"[%%s] 开始切换%%s\\n\" \"\$(TZ=CST-8 date '+%%F %%T')\" \"%s\" >>\"\$log\";"
+                                    "for p in /dev/at_mdm0 /dev/at_mdm1 /dev/at_usb0 /dev/smd7 /dev/smd11; do"
+                                    "  [ -e \"\$p\" ] || continue;"
+                                    "  cat \"\$p\" & PID=\$!;"
+                                    "  sleep 0.3;"
+                                    "  printf 'AT+CLCK=\"SC\",1,\"%s\"\r' > \"\$p\";"
+                                    "  sleep 2;"
+                                    "  kill \"\$PID\" 2>/dev/null;"
+                                    "  printf \"[%%s] AT已发送到%%s\\n\" \"\$(TZ=CST-8 date '+%%F %%T')\" \"\$p\" >>\"\$log\";"
+                                    "  break;"
+                                    "done;"
+                                    "printf \"[%%s] 切换%%s完成\\n\" \"\$(TZ=CST-8 date '+%%F %%T')\" \"%s\" >>\"\$log\";"
+                                    "tail -n 30 \"\$log\" >\"\$log.trim\" && mv \"\$log.trim\" \"\$log\";"
+                                    "' >/dev/null 2>&1 &",
+                                    carrier, pin, carrier);
+                                system(cmd);
+                                snprintf(g_toast, sizeof g_toast, "正在切换到 %s...", carrier);
                                 g_plugin_status_at = 0;
                             } else {
                                 snprintf(g_toast, sizeof g_toast, "不支持的PIN码");
