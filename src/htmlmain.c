@@ -1536,7 +1536,7 @@ static void plugin_status_refresh(const char *path, int force)
     else if (plugin_page_named(path, "operator-lock.html")) refresh_operator_status();
     else if (plugin_page_named(path, "fmswitch.html")) refresh_fmswitch_status();
 }
-static void refresh_fmswitch_status(void)
+static void refresh_fmswitch_status(void);
 {
     FILE *fp;
     char line[256], cmd[512];
