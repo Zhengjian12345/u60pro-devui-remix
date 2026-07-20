@@ -6942,7 +6942,7 @@ static void screen_on_ext(drm_disp_t *d, devui_ext_t *ext)
 
 static int handle_fmswitch(const char *arg, uint32_t now)
 {
-    char cmd[768], label[32] = "";
+    char cmd[512], label[32] = "";
     const char *pin = arg;
 
     if (!g_fm_installed) {
@@ -6952,7 +6952,8 @@ static int handle_fmswitch(const char *arg, uint32_t now)
     }
 
     if (!strcmp(pin, "unlock")) {
-        snprintf(cmd, sizeof cmd, "sh '%s' unlock >>'%s' 2>&1 &", FMSIMPIN_SCRIPT, FMSWITCH_ACTION_LOG);
+        snprintf(cmd, sizeof cmd, "sh '%s' unlock >>'%s' 2>&1 &",
+                 FMSIMPIN_SCRIPT, FMSWITCH_ACTION_LOG);
         plugin_action_note(FMSWITCH_ACTION_LOG, "解除 SIM PIN 锁定");
         system(cmd);
         snprintf(g_toast, sizeof g_toast, "正在解除 PIN 锁定...");
@@ -6961,7 +6962,8 @@ static int handle_fmswitch(const char *arg, uint32_t now)
     }
 
     if (!strcmp(pin, "rescan")) {
-        snprintf(cmd, sizeof cmd, "sh '%s' rescan >>'%s' 2>&1 &", FMSIMPIN_SCRIPT, FMSWITCH_ACTION_LOG);
+        snprintf(cmd, sizeof cmd, "sh '%s' rescan >>'%s' 2>&1 &",
+                 FMSIMPIN_SCRIPT, FMSWITCH_ACTION_LOG);
         plugin_action_note(FMSWITCH_ACTION_LOG, "重新搜索网络");
         system(cmd);
         snprintf(g_toast, sizeof g_toast, "正在重新搜网...");
@@ -6970,7 +6972,8 @@ static int handle_fmswitch(const char *arg, uint32_t now)
     }
 
     if (!strcmp(pin, "imsi")) {
-        snprintf(cmd, sizeof cmd, "sh '%s' imsi >>'%s' 2>&1 &", FMSIMPIN_SCRIPT, FMSWITCH_ACTION_LOG);
+        snprintf(cmd, sizeof cmd, "sh '%s' imsi >>'%s' 2>&1 &",
+                 FMSIMPIN_SCRIPT, FMSWITCH_ACTION_LOG);
         plugin_action_note(FMSWITCH_ACTION_LOG, "查询 IMSI");
         system(cmd);
         snprintf(g_toast, sizeof g_toast, "正在查询 IMSI...");
@@ -6997,18 +7000,13 @@ static int handle_fmswitch(const char *arg, uint32_t now)
     g_fm_cooldown_until = now + FM_COOLDOWN_SEC * 1000U;
     g_fm_cooldown = 1;
 
+    /* 使用外部脚本执行切卡，避免 C 字符串嵌套引号问题 */
     snprintf(cmd, sizeof cmd,
-             "nohup sh -c 'export TZ=CST-8; log="%s"; tmp="${log}.out.$$"; "
-             "printf "[%%s] 开始切卡到 %s (PIN: %s)\n" "$(date "+%%F %%T")" >>"$log"; "
-             "sh "%s" switch %s "%s" >"$tmp" 2>&1; rc=$?; "
-             "while IFS= read -r line || [ -n "$line" ]; do "
-             "printf "[%%s] %%s\n" "$(date "+%%F %%T")" "$line"; done <"$tmp" >>"$log"; "
-             "rm -f "$tmp"; printf "[%%s] 切卡完成，退出码 %%s\n" "
-             ""$(date "+%%F %%T")" "$rc" >>"$log"; "
-             "tail -n 30 "$log" >"$log.trim" && mv "$log.trim" "$log"; exit "$rc"' "
-             ">/dev/null 2>&1 &",
-             FMSWITCH_ACTION_LOG, label, pin, FMSIMPIN_SCRIPT, pin, label);
+             "nohup sh /data/ufi-tools/u60pro-devui/fmswitch.sh '%s' '%s' '%s' >/dev/null 2>&1 &",
+             label, pin, FMSWITCH_ACTION_LOG);
     system(cmd);
+
+    plugin_action_note(FMSWITCH_ACTION_LOG, label);
 
     snprintf(g_toast, sizeof g_toast, "正在切卡到 %s...", label);
     g_toast_until = now + 3000;
