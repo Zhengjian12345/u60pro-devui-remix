@@ -545,3 +545,58 @@ body.light .sthint.bad { background: #fff0ee; color: #b6362d; border: 1px solid 
   50% { opacity: 1; width: 70%; }
   100% { opacity: .6; width: 30%; }
 }
+/* 飞猫分身切卡 - v2 */
+.lockcard {
+  display: block;
+  margin: 8px 0;
+  padding: 14px 16px;
+  border-radius: 12px;
+  background: var(--card);
+  border: 1.5px solid transparent;
+  text-decoration: none;
+  transition: all .15s ease;
+}
+.lockcard:active {
+  background: var(--prim);
+  transform: scale(0.98);
+}
+.lockcard.active {
+  border-color: var(--prim);
+  background: rgba(79,143,232,.08);
+}
+.lockcard .lc-t {
+  font-size: 1rem;
+  font-weight: 600;
+  color: var(--fg);
+}
+.lockcard .lc-b {
+  font-size: .65rem;
+  color: var(--muted);
+  margin-top: 4px;
+}
+.lockcard.active .lc-t {
+  color: var(--prim);
+}
+
+.progress-card {
+  background: rgba(79,143,232,.08);
+  border: 1px solid rgba(79,143,232,.2);
+}
+.progress-bar {
+  height: 4px;
+  background: var(--track);
+  border-radius: 2px;
+  margin-top: 10px;
+  overflow: hidden;
+}
+.progress-fill {
+  height: 100%;
+  background: var(--prim);
+  border-radius: 2px;
+  animation: progressPulse 1.5s ease infinite;
+}
+@keyframes progressPulse {
+  0% { opacity: .6; width: 30%; }
+  50% { opacity: 1; width: 70%; }
+  100% { opacity: .6; width: 30%; }
+}
