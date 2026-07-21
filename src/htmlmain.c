@@ -109,6 +109,11 @@ static uint32_t monotonic_seconds(void)
 #define CPU_ACTION_LOG "/tmp/devui-cpu-action.log"
 #define FMSWITCH_ACTION_LOG "/tmp/devui-fmswitch-action.log"
 
+struct plugin_candidate {
+    const char *name;
+    const char *path;
+    // 根据实际使用情况补充其他字段
+};
 static const struct plugin_candidate g_fm_candidates[] = {
     { "/data/plugins", "/data/plugins/fmsimpin.sh", NULL },
     { "/data/ufi-tools", "/data/ufi-tools/fmsimpin.sh", NULL },
@@ -1526,6 +1531,7 @@ static void refresh_operator_status(void)
     operator_scan_load(path);
 }
 
+static void refresh_fmswitch_status(void);
 static void plugin_status_refresh(const char *path, int force)
 {
     uint32_t now = millis();
