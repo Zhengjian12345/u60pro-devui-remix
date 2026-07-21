@@ -8300,4 +8300,3 @@ action_done:
     drm_disp_close(&disp);
     return 0;
 }
-}
