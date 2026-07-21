@@ -8300,41 +8300,4 @@ action_done:
     drm_disp_close(&disp);
     return 0;
 }
-
-static void refresh_fmswitch_status(void)
-{
-    const struct plugin_candidate *p = plugin_script_select(g_fm_candidates, ARRAY_LEN(g_fm_candidates), 0);
-    FILE *fp;
-  g_fm_pass_set[0] = '0';
-    char line[256], cmd[512];
-
-    g_fm_installed = 0;
-    g_fm_switching = 0;
-    snprintf(g_fm_provider, sizeof g_fm_provider, "-");
-    snprintf(g_fm_nettype, sizeof g_fm_nettype, "-");
-    snprintf(g_fm_band, sizeof g_fm_band, "-");
-    snprintf(g_fm_signal, sizeof g_fm_signal, "-");
-    snprintf(g_fm_mcc, sizeof g_fm_mcc, "-");
-    snprintf(g_fm_mnc, sizeof g_fm_mnc, "-");
-    snprintf(g_fm_pin, sizeof g_fm_pin, "-");
-    if (!p) return;
-    g_fm_installed = 1;
-    snprintf(cmd, sizeof cmd, "sh '%s' status 2>/dev/null", p->ctl);
-    fp = popen(cmd, "r");
-    if (!fp) return;
-    while (fgets(line, sizeof line, fp)) {
-        if      (!strncmp(line, "FM_INSTALLED=", 13)) g_fm_installed = atoi(line + 13);
-        else if (!strncmp(line, "FM_PROVIDER=", 12))  line_value(g_fm_provider, sizeof g_fm_provider, line, 12);
-        else if (!strncmp(line, "FM_NETTYPE=", 11))  line_value(g_fm_nettype, sizeof g_fm_nettype, line, 11);
-        else if (!strncmp(line, "FM_BAND=", 8))      line_value(g_fm_band, sizeof g_fm_band, line, 8);
-        else if (!strncmp(line, "FM_SIGNAL=", 10))   line_value(g_fm_signal, sizeof g_fm_signal, line, 10);
-        else if (!strncmp(line, "FM_MCC=", 7))       line_value(g_fm_mcc, sizeof g_fm_mcc, line, 7);
-        else if (!strncmp(line, "FM_MNC=", 7))       line_value(g_fm_mnc, sizeof g_fm_mnc, line, 7);
-        else if (!strncmp(line, "FM_PIN=", 7))       line_value(g_fm_pin, sizeof g_fm_pin, line, 7);
-        else if (!strncmp(line, "FM_PASS_SET=", 12)) {
-            line_value(g_fm_pass_set, sizeof g_fm_pass_set, line, 12);
-        }
-        else if (!strncmp(line, "FM_SWITCHING=", 13)) g_fm_switching = atoi(line + 13);
-    }
-    pclose(fp);
 }
