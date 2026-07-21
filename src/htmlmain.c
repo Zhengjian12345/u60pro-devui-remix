@@ -117,7 +117,7 @@ struct plugin_candidate {
 };
 
 static const struct plugin_candidate g_fm_candidates[] = {
-    { "/data/plugins", "/data/plugins/fmsimpin.sh", NULL },
+    { "/data/plugins/u60pro-devui/ui/functions/", "/data/plugins/u60pro-devui/ui/functions/fmsimpin.sh", NULL },
     { "/data/ufi-tools", "/data/ufi-tools/fmsimpin.sh", NULL },
     { "/data/kano_plugins", "/data/kano_plugins/fmsimpin.sh", NULL },
 };
