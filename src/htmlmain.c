@@ -107,6 +107,14 @@ static uint32_t monotonic_seconds(void)
 #define CPU_CTL_LEGACY  UI_DIR "/../cpuctl.sh"
 #define CPU_CTL_OLD     "/data/ufi-tools/u60pro-devui/cpuctl.sh"
 #define CPU_ACTION_LOG "/tmp/devui-cpu-action.log"
+#define FMSWITCH_ACTION_LOG "/tmp/devui-fmswitch-action.log"
+
+static const struct plugin_candidate g_fm_candidates[] = {
+    { "/data/plugins", "/data/plugins/fmsimpin.sh", NULL },
+    { "/data/ufi-tools", "/data/ufi-tools/fmsimpin.sh", NULL },
+    { "/data/kano_plugins", "/data/kano_plugins/fmsimpin.sh", NULL },
+};
+
 
 struct plugin_candidate {
     const char *dir;
@@ -213,17 +221,15 @@ static char g_op_rat_pref[16] = "auto", g_op_failure_policy[24] = "stay_offline"
 static char g_op_selected[8];
 static uint32_t g_op_confirm_until;
 static struct operator_candidate_state g_op_scan[OP_MAX_CANDIDATES];
-/* ---- fmswitch (飞猫分身切卡) ---- */
-#define FMSWITCH_ACTION_LOG "/tmp/devui-fmswitch-action.log"
-#define FMSWITCH_STATUS_FILE "/tmp/fmswitch.status"
-#define FMSWITCH_CTL "/data/plugins/u60pro-devui/ui/functions/fmsimpin.sh"
-static int g_fm_installed;
-static char g_fm_carrier[24] = "-";
-static char g_fm_status[24] = "-";
-static char g_fm_net[16] = "-";
-static char g_fm_imsi[24] = "-";
-static char g_fm_cool[64] = "-";
-static uint32_t g_fm_status_at;
+static int g_fm_installed, g_fm_switching;
+static char g_fm_provider[48] = "-";
+static char g_fm_nettype[16] = "-";
+static char g_fm_band[16] = "-";
+static char g_fm_signal[8] = "-";
+static char g_fm_mcc[8] = "-";
+static char g_fm_mnc[8] = "-";
+static char g_fm_pin[8] = "-";
+
 
 static const char *cpu_ctl_path(void)
 {
@@ -1519,45 +1525,7 @@ static void refresh_operator_status(void)
     snprintf(path, sizeof path, "%s/scan.raw", p->dir);
     operator_scan_load(path);
 }
-static void refresh_fmswitch_status(void)
-{
-    FILE *fp;
-    char line[128];
 
-    g_fm_installed = 0;
-    snprintf(g_fm_carrier, sizeof g_fm_carrier, "-");
-    snprintf(g_fm_status, sizeof g_fm_status, "-");
-    snprintf(g_fm_net, sizeof g_fm_net, "-");
-    snprintf(g_fm_imsi, sizeof g_fm_imsi, "-");
-    snprintf(g_fm_cool, sizeof g_fm_cool, "-");
-
-    if (access(FMSWITCH_CTL, R_OK) != 0)
-        return;
-
-    g_fm_installed = 1;
-
-    fp = fopen(FMSWITCH_STATUS_FILE, "r");
-    if (!fp) {
-        system("sh " FMSWITCH_CTL " status >/dev/null 2>&1 &");
-        return;
-    }
-
-    while (fgets(line, sizeof line, fp)) {
-        size_t n = strcspn(line, "\r\n");
-        line[n] = 0;
-        if (!strncmp(line, "CARRIER=", 8))
-            snprintf(g_fm_carrier, sizeof g_fm_carrier, "%s", line + 8);
-        else if (!strncmp(line, "STATUS=", 7))
-            snprintf(g_fm_status, sizeof g_fm_status, "%s", line + 7);
-        else if (!strncmp(line, "NET=", 4))
-            snprintf(g_fm_net, sizeof g_fm_net, "%s", line + 4);
-        else if (!strncmp(line, "IMSI=", 5))
-            snprintf(g_fm_imsi, sizeof g_fm_imsi, "%s", line + 5);
-        else if (!strncmp(line, "COOL=", 5))
-            snprintf(g_fm_cool, sizeof g_fm_cool, "%s", line + 5);
-    }
-    fclose(fp);
-}
 static void plugin_status_refresh(const char *path, int force)
 {
     uint32_t now = millis();
@@ -1571,7 +1539,7 @@ static void plugin_status_refresh(const char *path, int force)
     else if (plugin_page_named(path, "cpu-performance.html")) refresh_cpu_status();
     else if (plugin_page_named(path, "wireguard.html")) refresh_wireguard_status();
     else if (plugin_page_named(path, "operator-lock.html")) refresh_operator_status();
-	else if (plugin_page_named(path, "fmswitch.html")) refresh_fmswitch_status();
+    else if (plugin_page_named(path, "fmswitch.html")) refresh_fmswitch_status();
 }
 
 /* ---- screen lock (PIN) persistence. The PIN lives in a dotfile under the UI
@@ -2046,9 +2014,6 @@ static int function_control_api_available(const char *name)
         return plugin_complete_select(g_wg_candidates, ARRAY_LEN(g_wg_candidates)) != NULL;
     if (!strcmp(name, "operator-lock.html"))
         return operator_complete_select() != NULL;
-    if (!strcmp(name, "fmswitch.html")) {
-        return access(FMSWITCH_CTL, R_OK) == 0;
-    }
     return 1;
 }
 
@@ -2204,7 +2169,7 @@ static const char *custom_function_tiles_html(void)
         else if (!strcmp(names[i], "cpu-performance.html")) desc = "频率策略与温控状态";
         else if (!strcmp(names[i], "wireguard.html")) desc = "隧道状态与 Peer";
         else if (!strcmp(names[i], "operator-lock.html")) desc = "扫描并锁定运营商";
-        else if (!strcmp(names[i], "fmswitch.html")) desc = "飞猫分身卡运营商切换";
+        else if (!strcmp(names[i], "fmswitch.html")) desc = "飞猫分身一键切卡";
         o += snprintf(buf + o, sizeof buf - o,
                       "<a href=\"act:func:%s\" class=\"func-tile func-custom\">"
                       "<span class=\"func-name\">%s</span>"
@@ -6089,15 +6054,34 @@ static int build_kv(struct kv *t, const char *path)
     t[i++] = (struct kv){ "OPCANCELCLASS", g_op_job_running ? "" : "disabled" };
     plugin_action_log_html(s_op_action_log, sizeof s_op_action_log, OPERATOR_ACTION_LOG);
     t[i++] = (struct kv){ "OPACTIONLOG", s_op_action_log };
-	    /* ---- fmswitch (飞猫分身切卡) ---- */
-    static char s_fm_action_log[2200];
-    plugin_action_log_html(s_fm_action_log, sizeof s_fm_action_log, FMSWITCH_ACTION_LOG);
-    t[i++] = (struct kv){ "FMSIM_CARRIER", g_fm_carrier };
-    t[i++] = (struct kv){ "FMSIM_STATUS", g_fm_status };
-    t[i++] = (struct kv){ "FMSIM_NET", g_fm_net };
-    t[i++] = (struct kv){ "FMSIM_IMSI", g_fm_imsi };
-    t[i++] = (struct kv){ "FMSIM_COOL", g_fm_cool };
-    t[i++] = (struct kv){ "FMSWITCH_LOG", s_fm_action_log };
+    /* ---- 飞猫分身切卡状态 ---- */
+    static char s_fm_progress[512], s_fm_log[2200], s_fm_state[32], s_fm_state_cls[16];
+    if (g_fm_switching) {
+        snprintf(s_fm_state, sizeof s_fm_state, "切换中");
+        snprintf(s_fm_state_cls, sizeof s_fm_state_cls, "warn");
+        snprintf(s_fm_progress, sizeof s_fm_progress,
+                 "<div class='card progress-card'><div class='title'>切卡进度 <span class='r muted'>请稍候</span></div>"
+                 "<div class='progress-bar'><div class='progress-fill'></div></div></div>");
+    } else {
+        snprintf(s_fm_state, sizeof s_fm_state, "%s", g_fm_installed ? "已就绪" : "未安装");
+        snprintf(s_fm_state_cls, sizeof s_fm_state_cls, "%s", g_fm_installed ? "ok" : "muted");
+        s_fm_progress[0] = 0;
+    }
+    plugin_action_log_html(s_fm_log, sizeof s_fm_log, FMSWITCH_ACTION_LOG);
+    t[i++] = (struct kv){ "FMSTATE", s_fm_state };
+    t[i++] = (struct kv){ "FMSTATECLASS", s_fm_state_cls };
+    t[i++] = (struct kv){ "FMOPERATOR", g_fm_provider };
+    t[i++] = (struct kv){ "FMNETTYPE", g_fm_nettype };
+    t[i++] = (struct kv){ "FMBAND", g_fm_band };
+    t[i++] = (struct kv){ "FMSIGNAL", g_fm_signal };
+    t[i++] = (struct kv){ "FMMCC", g_fm_mcc };
+    t[i++] = (struct kv){ "FMMNC", g_fm_mnc };
+    t[i++] = (struct kv){ "FMSLOT0100CLS", !strcmp(g_fm_pin, "0100") ? "active" : "" };
+    t[i++] = (struct kv){ "FMSLOT0200CLS", !strcmp(g_fm_pin, "0200") ? "active" : "" };
+    t[i++] = (struct kv){ "FMSLOT0300CLS", !strcmp(g_fm_pin, "0300") ? "active" : "" };
+    t[i++] = (struct kv){ "FMPROGRESS", s_fm_progress };
+    t[i++] = (struct kv){ "FMLOG", s_fm_log };
+
     return i;
 }
 
@@ -7662,7 +7646,19 @@ queued_done:
                             last_act = now;
                             need_render = 1;
                         }
-                        else if (!strcmp(a, "backfunc")) {
+                                        else if (strncmp(act, "act:fmswitch:", 13) == 0) {
+                    const char *pin = act + 13;
+                    const struct plugin_candidate *p = plugin_script_select(g_fm_candidates, ARRAY_LEN(g_fm_candidates), 0);
+                    if (p && pin[0] && strlen(pin) == 4) {
+                        char verb[32];
+                        snprintf(verb, sizeof verb, "switch %s", pin);
+                        plugin_action_submit(FMSWITCH_ACTION_LOG, "sh ", p->ctl, verb, "飞猫分身切卡");
+                        snprintf(g_toast, sizeof g_toast, "正在切换运营商...");
+                        g_toast_until = now + 2000;
+                        need_render = 1;
+                    }
+                }
+else if (!strcmp(a, "backfunc")) {
                             subpage_close();
                             menu = 0;
                             g_modal = 0;
@@ -7983,47 +7979,6 @@ queued_done:
                             last_act = now;
                             need_render = 1;
                         }
-                        else if (!strncmp(a, "fmswitch:", 9)) {
-                            const char *sub = a + 9;
-                            char cmd[384];
-
-                            if (access(FMSWITCH_CTL, R_OK) != 0) {
-                                snprintf(g_toast, sizeof g_toast, "飞猫分身插件未安装");
-                                g_toast_until = now + 2000;
-                                need_render = 1;
-                                goto action_done;
-                            }
-
-                            if (!strcmp(sub, "0200")) {
-                                snprintf(cmd, sizeof cmd, "sh " FMSWITCH_CTL " switch 0200");
-                                plugin_action_submit(FMSWITCH_ACTION_LOG, "", cmd, "", "切换到移动");
-                                snprintf(g_toast, sizeof g_toast, "正在切换到移动...");
-                            } else if (!strcmp(sub, "0100")) {
-                                snprintf(cmd, sizeof cmd, "sh " FMSWITCH_CTL " switch 0100");
-                                plugin_action_submit(FMSWITCH_ACTION_LOG, "", cmd, "", "切换到联通");
-                                snprintf(g_toast, sizeof g_toast, "正在切换到联通...");
-                            } else if (!strcmp(sub, "0300")) {
-                                snprintf(cmd, sizeof cmd, "sh " FMSWITCH_CTL " switch 0300");
-                                plugin_action_submit(FMSWITCH_ACTION_LOG, "", cmd, "", "切换到电信");
-                                snprintf(g_toast, sizeof g_toast, "正在切换到电信...");
-                            } else if (!strcmp(sub, "unlock")) {
-                                snprintf(cmd, sizeof cmd, "sh " FMSWITCH_CTL " unlock");
-                                plugin_action_submit(FMSWITCH_ACTION_LOG, "", cmd, "", "解锁SIM卡");
-                                snprintf(g_toast, sizeof g_toast, "正在解锁...");
-                            } else if (!strcmp(sub, "rescan")) {
-                                snprintf(cmd, sizeof cmd, "sh " FMSWITCH_CTL " rescan");
-                                plugin_action_submit(FMSWITCH_ACTION_LOG, "", cmd, "", "重新搜网");
-                                snprintf(g_toast, sizeof g_toast, "正在重新搜网...");
-                            } else if (!strcmp(sub, "imsi")) {
-                                snprintf(cmd, sizeof cmd, "sh " FMSWITCH_CTL " imsi");
-                                plugin_action_submit(FMSWITCH_ACTION_LOG, "", cmd, "", "查询IMSI");
-                                snprintf(g_toast, sizeof g_toast, "正在查询IMSI...");
-                            } else {
-                                snprintf(g_toast, sizeof g_toast, "未知操作");
-                            }
-                            g_toast_until = now + 2000;
-                            need_render = 1;
-                        }
                         else if (!strcmp(a, "oprefresh") || !strcmp(a, "opscan") ||
                                  !strcmp(a, "opapply") || !strcmp(a, "opauto") ||
                                  !strcmp(a, "opcancel")) {
@@ -8302,4 +8257,37 @@ action_done:
     data_backend_close();
     drm_disp_close(&disp);
     return 0;
+}
+static void refresh_fmswitch_status(void)
+{
+    const struct plugin_candidate *p = plugin_script_select(g_fm_candidates, ARRAY_LEN(g_fm_candidates), 0);
+    FILE *fp;
+    char line[256], cmd[512];
+
+    g_fm_installed = 0;
+    g_fm_switching = 0;
+    snprintf(g_fm_provider, sizeof g_fm_provider, "-");
+    snprintf(g_fm_nettype, sizeof g_fm_nettype, "-");
+    snprintf(g_fm_band, sizeof g_fm_band, "-");
+    snprintf(g_fm_signal, sizeof g_fm_signal, "-");
+    snprintf(g_fm_mcc, sizeof g_fm_mcc, "-");
+    snprintf(g_fm_mnc, sizeof g_fm_mnc, "-");
+    snprintf(g_fm_pin, sizeof g_fm_pin, "-");
+    if (!p) return;
+    g_fm_installed = 1;
+    snprintf(cmd, sizeof cmd, "sh '%s' status 2>/dev/null", p->ctl);
+    fp = popen(cmd, "r");
+    if (!fp) return;
+    while (fgets(line, sizeof line, fp)) {
+        if      (!strncmp(line, "FM_INSTALLED=", 13)) g_fm_installed = atoi(line + 13);
+        else if (!strncmp(line, "FM_PROVIDER=", 12))  line_value(g_fm_provider, sizeof g_fm_provider, line, 12);
+        else if (!strncmp(line, "FM_NETTYPE=", 11))  line_value(g_fm_nettype, sizeof g_fm_nettype, line, 11);
+        else if (!strncmp(line, "FM_BAND=", 8))      line_value(g_fm_band, sizeof g_fm_band, line, 8);
+        else if (!strncmp(line, "FM_SIGNAL=", 10))   line_value(g_fm_signal, sizeof g_fm_signal, line, 10);
+        else if (!strncmp(line, "FM_MCC=", 7))       line_value(g_fm_mcc, sizeof g_fm_mcc, line, 7);
+        else if (!strncmp(line, "FM_MNC=", 7))       line_value(g_fm_mnc, sizeof g_fm_mnc, line, 7);
+        else if (!strncmp(line, "FM_PIN=", 7))       line_value(g_fm_pin, sizeof g_fm_pin, line, 7);
+        else if (!strncmp(line, "FM_SWITCHING=", 13)) g_fm_switching = atoi(line + 13);
+    }
+    pclose(fp);
 }
