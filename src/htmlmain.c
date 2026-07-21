@@ -109,17 +109,17 @@ static uint32_t monotonic_seconds(void)
 #define CPU_ACTION_LOG "/tmp/devui-cpu-action.log"
 #define FMSWITCH_ACTION_LOG "/tmp/devui-fmswitch-action.log"
 
-/* 只保留一个 struct 定义（3字段版本） */
+static const struct plugin_candidate g_fm_candidates[] = {
+    { "/data/plugins/u60pro-devui/ui/functions/", "/data/plugins/u60pro-devui/ui/functions/fmsimpin.sh", NULL },
+    { "/data/ufi-tools", "/data/ufi-tools/fmsimpin.sh", NULL },
+    { "/data/kano_plugins", "/data/kano_plugins/fmsimpin.sh", NULL },
+};
+
+
 struct plugin_candidate {
     const char *dir;
     const char *ctl;
     const char *bin;
-};
-
-static const struct plugin_candidate g_fm_candidates[] = {
-    { "/data/plugins/u60pro-devui/ui/functions/","/data/plugins/u60pro-devui/ui/functions/fmsimpin.sh", NULL },
-    { "/data/ufi-tools", "/data/ufi-tools/fmsimpin.sh", NULL },
-    { "/data/kano_plugins", "/data/kano_plugins/fmsimpin.sh", NULL },
 };
 
 static const struct plugin_candidate g_ts_candidates[] = {
@@ -1526,7 +1526,6 @@ static void refresh_operator_status(void)
     operator_scan_load(path);
 }
 
-static void refresh_fmswitch_status(void);
 static void plugin_status_refresh(const char *path, int force)
 {
     uint32_t now = millis();
@@ -8292,3 +8291,4 @@ static void refresh_fmswitch_status(void)
     }
     pclose(fp);
 }
+
