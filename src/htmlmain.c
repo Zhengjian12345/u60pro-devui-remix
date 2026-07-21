@@ -8302,7 +8302,6 @@ action_done:
     return 0;
 }
 
-{
     const struct plugin_candidate *p = plugin_script_select(g_fm_candidates, ARRAY_LEN(g_fm_candidates), 0);
 
     FILE *fp;
