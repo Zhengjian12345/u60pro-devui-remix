@@ -8301,8 +8301,9 @@ action_done:
     return 0;
 }
 
+static void refresh_fmswitch_status(void)
+{
     const struct plugin_candidate *p = plugin_script_select(g_fm_candidates, ARRAY_LEN(g_fm_candidates), 0);
-
     FILE *fp;
   g_fm_pass_set[0] = '0';
     char line[256], cmd[512];
