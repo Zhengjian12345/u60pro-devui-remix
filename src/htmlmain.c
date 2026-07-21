@@ -6081,7 +6081,9 @@ static int build_kv(struct kv *t, const char *path)
     t[i++] = (struct kv){ "FMSLOT0300CLS", !strcmp(g_fm_pin, "0300") ? "active" : "" };
     t[i++] = (struct kv){ "FMPROGRESS", s_fm_progress };
     t[i++] = (struct kv){ "FMLOG", s_fm_log };
-
+    t[i++] = (struct kv){ "FMPASSSET", g_fm_pass_set };
+    t[i++] = (struct kv){ "FMPASSSTATUS", !strcmp(g_fm_pass_set, "1") ? "已设置" : "未设置" };
+    t[i++] = (struct kv){ "FMPASSBTN", !strcmp(g_fm_pass_set, "1") ? "修改密码" : "设置密码" };
     return i;
 }
 
@@ -7653,6 +7655,12 @@ queued_done:
                         char verb[32];
                         snprintf(verb, sizeof verb, "switch %s", pin);
                         plugin_action_submit(FMSWITCH_ACTION_LOG, "sh ", p->ctl, verb, "飞猫分身切卡");
+                          } else if (strncmp(param, "setpass:", 8) == 0) {
+        char cmd[512];
+        snprintf(cmd, sizeof(cmd), "sh '%s' setpass '%s' >/dev/null 2>&1 &", p->ctl, param + 8);
+        system(cmd);
+        snprintf(g_toast, sizeof g_toast, "密码已更新");
+        g_toast_until = now + 1600;
                         snprintf(g_toast, sizeof g_toast, "正在切换运营商...");
                         g_toast_until = now + 2000;
                         need_render = 1;
@@ -8261,7 +8269,9 @@ action_done:
 static void refresh_fmswitch_status(void)
 {
     const struct plugin_candidate *p = plugin_script_select(g_fm_candidates, ARRAY_LEN(g_fm_candidates), 0);
+  static char g_fm_pass_set[8] = "0";static char g_fm_pass_set[8] = "0";
     FILE *fp;
+  g_fm_pass_set[0] = '0';
     char line[256], cmd[512];
 
     g_fm_installed = 0;
@@ -8287,6 +8297,9 @@ static void refresh_fmswitch_status(void)
         else if (!strncmp(line, "FM_MCC=", 7))       line_value(g_fm_mcc, sizeof g_fm_mcc, line, 7);
         else if (!strncmp(line, "FM_MNC=", 7))       line_value(g_fm_mnc, sizeof g_fm_mnc, line, 7);
         else if (!strncmp(line, "FM_PIN=", 7))       line_value(g_fm_pin, sizeof g_fm_pin, line, 7);
+        else if (!strncmp(line, "FM_PASS_SET=", 12)) {
+            line_value(g_fm_pass_set, sizeof g_fm_pass_set, line, 12);
+        }
         else if (!strncmp(line, "FM_SWITCHING=", 13)) g_fm_switching = atoi(line + 13);
     }
     pclose(fp);
