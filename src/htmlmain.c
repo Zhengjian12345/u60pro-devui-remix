@@ -8301,7 +8301,7 @@ action_done:
     drm_disp_close(&disp);
     return 0;
 }
-static void refresh_fmswitch_status(void)
+
 {
     const struct plugin_candidate *p = plugin_script_select(g_fm_candidates, ARRAY_LEN(g_fm_candidates), 0);
 
