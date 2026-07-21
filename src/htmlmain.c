@@ -6117,6 +6117,7 @@ static int build_kv(struct kv *t, const char *path)
     t[i++] = (struct kv){ "FMSLOT0100CLS", !strcmp(g_fm_pin, "0100") ? "active" : "" };
     t[i++] = (struct kv){ "FMSLOT0200CLS", !strcmp(g_fm_pin, "0200") ? "active" : "" };
     t[i++] = (struct kv){ "FMSLOT0300CLS", !strcmp(g_fm_pin, "0300") ? "active" : "" };
+    t[i++] = (struct kv){ "FMCURRNETCLS", g_fm_pin[0] ? "net-current" : "" };
     t[i++] = (struct kv){ "FMPROGRESS", s_fm_progress };
     t[i++] = (struct kv){ "FMLOG", s_fm_log };
     t[i++] = (struct kv){ "FMPASSSET", g_fm_pass_set };
