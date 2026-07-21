@@ -1526,7 +1526,6 @@ static void refresh_operator_status(void)
     snprintf(path, sizeof path, "%s/scan.raw", p->dir);
     operator_scan_load(path);
 }
-static void refresh_fmswitch_status(void);
 
 static void refresh_fmswitch_status(void)
 {
