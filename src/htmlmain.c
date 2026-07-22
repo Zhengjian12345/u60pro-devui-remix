@@ -7697,6 +7697,15 @@ queued_done:
                             g_toast_until = now + 1800;
                             need_render = 1;
                         } else if (pc) {
+                            /* === 新增：切卡前即时提示 === */
+                            const char *target_name = 
+                                !strcmp(pin, "0200") ? "中国移动" :
+                                !strcmp(pin, "0300") ? "中国电信" :
+                                !strcmp(pin, "0100") ? "中国联通" : "目标网络";
+                            snprintf(g_toast, sizeof g_toast, "正在切换至%s...", target_name);
+                            g_toast_until = now + 3000;  /* 3秒，等待异步任务完成 */
+                            /* ============================ */
+                            
                             plugin_action_note(FMSWITCH_ACTION_LOG, "开始切卡");
                             snprintf(verb, sizeof verb, "switch %s", pin);
                             plugin_action_submit(FMSWITCH_ACTION_LOG, "sh ", pc->ctl, verb, "切卡操作");
@@ -7706,7 +7715,7 @@ queued_done:
                             g_toast_until = now + 1800;
                             need_render = 1;
                         }
-                        last_act = now;   // ← 补上
+                        last_act = now;
                     }
                     else if (!strcmp(a, "backfunc")) {
                             subpage_close();
