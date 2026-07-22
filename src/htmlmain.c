@@ -107,9 +107,7 @@ static uint32_t monotonic_seconds(void)
 #define CPU_CTL_LEGACY  UI_DIR "/../cpuctl.sh"
 #define CPU_CTL_OLD     "/data/ufi-tools/u60pro-devui/cpuctl.sh"
 #define CPU_ACTION_LOG "/tmp/devui-cpu-action.log"
-#define FMSWITCH_ACTION_LOG "/tmp/devui-fmswitch-action.log"
 
-/* 只保留 3 字段定义，g_fm_candidates 也用 3 字段初始化 */
 struct plugin_candidate {
     const char *dir;
     const char *ctl;
@@ -221,15 +219,6 @@ static char g_op_rat_pref[16] = "auto", g_op_failure_policy[24] = "stay_offline"
 static char g_op_selected[8];
 static uint32_t g_op_confirm_until;
 static struct operator_candidate_state g_op_scan[OP_MAX_CANDIDATES];
-static int g_fm_installed, g_fm_switching;
-static char g_fm_provider[48] = "-";
-static char g_fm_nettype[16] = "-";
-static char g_fm_band[16] = "-";
-static char g_fm_signal[8] = "-";
-static char g_fm_mcc[8] = "-";
-static char g_fm_mnc[8] = "-";
-static char g_fm_pin[8] = "-";
-
 
 static const char *cpu_ctl_path(void)
 {
@@ -1172,8 +1161,7 @@ static int plugin_status_page(const char *path)
                     strstr(path, "/functions/mihomo.html") ||
                     strstr(path, "/functions/cpu-performance.html") ||
                     strstr(path, "/functions/wireguard.html") ||
-                    strstr(path, "/functions/operator-lock.html") ||
-                    strstr(path, "/functions/fmswitch.html"));
+                    strstr(path, "/functions/operator-lock.html"));
 }
 
 static int plugin_page_named(const char *path, const char *name)
@@ -1526,41 +1514,6 @@ static void refresh_operator_status(void)
     operator_scan_load(path);
 }
 
-static void refresh_fmswitch_status(void)
-{
-    const struct plugin_candidate *p = plugin_script_select(g_fm_candidates, ARRAY_LEN(g_fm_candidates), 0);
-    FILE *fp;
-    char line[512], cmd[512];
-
-    g_fm_installed = 0;
-    g_fm_switching = 0;
-    snprintf(g_fm_provider, sizeof g_fm_provider, "-");
-    snprintf(g_fm_nettype, sizeof g_fm_nettype, "-");
-    snprintf(g_fm_band, sizeof g_fm_band, "-");
-    snprintf(g_fm_signal, sizeof g_fm_signal, "-");
-    snprintf(g_fm_mcc, sizeof g_fm_mcc, "-");
-    snprintf(g_fm_mnc, sizeof g_fm_mnc, "-");
-    snprintf(g_fm_pin, sizeof g_fm_pin, "-");
-    if (!p) return;
-    g_fm_installed = 1;
-    snprintf(cmd, sizeof cmd, "sh '%s' status 2>/dev/null", p->ctl);
-    fp = popen(cmd, "r");
-    if (fp) {
-        while (fgets(line, sizeof line, fp)) {
-            if      (!strncmp(line, "FM_INSTALLED=", 13)) g_fm_installed = atoi(line + 13);
-            else if (!strncmp(line, "FM_PROVIDER=", 12)) line_value(g_fm_provider, sizeof g_fm_provider, line, 12);
-            else if (!strncmp(line, "FM_NETTYPE=", 11)) line_value(g_fm_nettype, sizeof g_fm_nettype, line, 11);
-            else if (!strncmp(line, "FM_BAND=", 8)) line_value(g_fm_band, sizeof g_fm_band, line, 8);
-            else if (!strncmp(line, "FM_SIGNAL=", 10)) line_value(g_fm_signal, sizeof g_fm_signal, line, 10);
-            else if (!strncmp(line, "FM_MCC=", 7)) line_value(g_fm_mcc, sizeof g_fm_mcc, line, 7);
-            else if (!strncmp(line, "FM_MNC=", 7)) line_value(g_fm_mnc, sizeof g_fm_mnc, line, 7);
-            else if (!strncmp(line, "FM_CUR_PIN=", 11)) line_value(g_fm_pin, sizeof g_fm_pin, line, 11);
-            else if (!strncmp(line, "FM_SWITCHING=", 13)) g_fm_switching = atoi(line + 13);
-        }
-        pclose(fp);
-    }
-    if (access("/tmp/fmswitch.pid", F_OK) == 0) g_fm_switching = 1;
-}
 static void plugin_status_refresh(const char *path, int force)
 {
     uint32_t now = millis();
@@ -1574,7 +1527,6 @@ static void plugin_status_refresh(const char *path, int force)
     else if (plugin_page_named(path, "cpu-performance.html")) refresh_cpu_status();
     else if (plugin_page_named(path, "wireguard.html")) refresh_wireguard_status();
     else if (plugin_page_named(path, "operator-lock.html")) refresh_operator_status();
-    else if (plugin_page_named(path, "fmswitch.html")) refresh_fmswitch_status();
 }
 
 /* ---- screen lock (PIN) persistence. The PIN lives in a dotfile under the UI
@@ -7710,7 +7662,7 @@ queued_done:
                             last_act = now;
                             need_render = 1;
                         }
-                    else if (!strncmp(a, "func:", 5)) {
+                        else if (!strncmp(a, "func:", 5)) {
                             if (function_page_open(a + 5)) {
                                 menu = 0;
                                 g_modal = 0;
@@ -7764,6 +7716,16 @@ queued_done:
                             g_sms_open = -1;
                             invalidate_render_html_cache();
                             last_act = now;
+                            need_render = 1;
+                        }
+                        else if (!strcmp(a, "theme"))     { g_theme = !g_theme; save_conf(); need_render = 1; }
+                        else if (!strcmp(a, "revealkey")) { g_show_key = !g_show_key; need_render = 1; }
+                        else if (!strcmp(a, "revealcell")) { g_show_cellid = !g_show_cellid; need_render = 1; }
+                        else if (!strcmp(a, "revealimei")) { g_show_imei = !g_show_imei; need_render = 1; }
+                        else if (!strcmp(a, "refreshambr")) {
+                            system("(kill -USR1 $(pidof zwrt-datad 2>/dev/null) >/dev/null 2>&1) || true");
+                            snprintf(g_toast, sizeof g_toast, "已请求刷新 AMBR");
+                            g_toast_until = now + 1600;
                             need_render = 1;
                         }
                         else if (!strcmp(a, "neighbors")) {
