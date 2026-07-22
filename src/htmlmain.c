@@ -6121,8 +6121,8 @@ static int build_kv(struct kv *t, const char *path)
     t[i++] = (struct kv){ "FMPROGRESS", s_fm_progress };
     t[i++] = (struct kv){ "FMLOG", s_fm_log };
     t[i++] = (struct kv){ "FMPASSSET", g_fm_pass_set };
-    t[i++] = (struct kv){ "FMPASSSTATUS", !strcmp(g_fm_pass_set, "1") ? "已设置" : "未设置" };
-    t[i++] = (struct kv){ "FMPASSBTN", !strcmp(g_fm_pass_set, "1") ? "修改密码" : "设置密码" };
+    t[i++] = (struct kv){ "FMCURPIN", g_fm_pin };
+    t[i++] = (struct kv){ "FMCURRNETCLS", g_fm_pin[0] ? "net-current" : "" };
     return i;
 }
 
@@ -7687,19 +7687,25 @@ queued_done:
                             last_act = now;
                             need_render = 1;
                         }
-                                        else if (strncmp(act, "act:fmswitch:", 13) == 0) {
-                    const char *pin = act + 13;
-                    const struct plugin_candidate *p = plugin_script_select(g_fm_candidates, ARRAY_LEN(g_fm_candidates), 0);
-                    if (p && pin && pin[0]) {
-                        plugin_action_note(FMSWITCH_ACTION_LOG, "开始切卡");
-                        g_fm_switching = 1;
-                        char cmd[512];
-                        snprintf(cmd, sizeof cmd, "sh '%s' switch '%s' 2>&1", p->ctl, pin);
-                        plugin_action_submit(FMSWITCH_ACTION_LOG, "sh ", p->ctl, "switch", "切卡操作");
-                        snprintf(g_toast, sizeof g_toast, "正在切卡...");
-                        g_toast_until = now + 2000;
-                        need_render = 1;
-                    }
+                    else if (strncmp(act, "act:fmswitch:", 13) == 0) {
+    const char *pin = act + 13;
+    char verb[64];
+    
+    /* 已经是当前网络，直接提示 */
+    if (g_fm_pin[0] && !strcmp(g_fm_pin, pin)) {
+        snprintf(g_toast, sizeof g_toast, "当前已是%s",
+                 !strcmp(pin, "0200") ? "中国移动" :
+                 !strcmp(pin, "0300") ? "中国电信" :
+                 !strcmp(pin, "0100") ? "中国联通" : "该网络");
+        g_toast_until = now + 1800;
+        need_render = 1;
+    } else {
+        plugin_action_note(FMSWITCH_ACTION_LOG, "开始切卡");
+        snprintf(verb, sizeof verb, "switch %s", pin);
+        plugin_action_submit(FMSWITCH_ACTION_LOG, "sh ", p->ctl, verb, "切卡操作");
+        need_render = 1;
+    }
+}
                 } else if (!strcmp(a, "backfunc")) {
 
                             subpage_close();
