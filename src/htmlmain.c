@@ -229,7 +229,6 @@ static char g_fm_signal[8] = "-";
 static char g_fm_mcc[8] = "-";
 static char g_fm_mnc[8] = "-";
 static char g_fm_pin[8] = "-";
-static char g_fm_pass_set[64] = {0};
 
 
 static const char *cpu_ctl_path(void)
@@ -1542,7 +1541,6 @@ static void refresh_fmswitch_status(void)
     snprintf(g_fm_mcc, sizeof g_fm_mcc, "-");
     snprintf(g_fm_mnc, sizeof g_fm_mnc, "-");
     snprintf(g_fm_pin, sizeof g_fm_pin, "-");
-    snprintf(g_fm_pass_set, sizeof g_fm_pass_set, "0");
     if (!p) return;
     g_fm_installed = 1;
     snprintf(cmd, sizeof cmd, "sh '%s' status 2>/dev/null", p->ctl);
@@ -1558,7 +1556,6 @@ static void refresh_fmswitch_status(void)
             else if (!strncmp(line, "FM_MNC=", 7)) line_value(g_fm_mnc, sizeof g_fm_mnc, line, 7);
             else if (!strncmp(line, "FM_CUR_PIN=", 11)) line_value(g_fm_pin, sizeof g_fm_pin, line, 11);
             else if (!strncmp(line, "FM_SWITCHING=", 13)) g_fm_switching = atoi(line + 13);
-            else if (!strncmp(line, "FM_PASS_SET=", 12)) line_value(g_fm_pass_set, sizeof g_fm_pass_set, line, 12);
         }
         pclose(fp);
     }
@@ -6120,7 +6117,6 @@ static int build_kv(struct kv *t, const char *path)
     t[i++] = (struct kv){ "FMCURRNETCLS", g_fm_pin[0] ? "net-current" : "" };
     t[i++] = (struct kv){ "FMPROGRESS", s_fm_progress };
     t[i++] = (struct kv){ "FMLOG", s_fm_log };
-    t[i++] = (struct kv){ "FMPASSSET", g_fm_pass_set };
     t[i++] = (struct kv){ "FMCURPIN", g_fm_pin };
     t[i++] = (struct kv){ "FMCURRNETCLS", g_fm_pin[0] ? "net-current" : "" };
     return i;
@@ -7710,6 +7706,7 @@ queued_done:
                             g_toast_until = now + 1800;
                             need_render = 1;
                         }
+                        last_act = now;   // ← 补上
                     }
                     else if (!strcmp(a, "backfunc")) {
                             subpage_close();
