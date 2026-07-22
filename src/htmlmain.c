@@ -7686,28 +7686,27 @@ queued_done:
                             }
                             last_act = now;
                             need_render = 1;
+                                            }
+                    else if (strncmp(act, "act:fmswitch:", 13) == 0) { 
+                        const char *pin = act + 13;
+                        char verb[64];
+                        
+                        /* 已经是当前网络，直接提示 */
+                        if (g_fm_pin[0] && !strcmp(g_fm_pin, pin)) {
+                            snprintf(g_toast, sizeof g_toast, "当前已是%s",
+                                     !strcmp(pin, "0200") ? "中国移动" :
+                                     !strcmp(pin, "0300") ? "中国电信" :
+                                     !strcmp(pin, "0100") ? "中国联通" : "该网络");
+                            g_toast_until = now + 1800;
+                            need_render = 1;
+                        } else {
+                            plugin_action_note(FMSWITCH_ACTION_LOG, "开始切卡");
+                            snprintf(verb, sizeof verb, "switch %s", pin);
+                            plugin_action_submit(FMSWITCH_ACTION_LOG, "sh ", p->ctl, verb, "切卡操作");
+                            need_render = 1;
                         }
-                    else if (strncmp(act, "act:fmswitch:", 13) == 0) {
-    const char *pin = act + 13;
-    char verb[64];
-    
-    /* 已经是当前网络，直接提示 */
-    if (g_fm_pin[0] && !strcmp(g_fm_pin, pin)) {
-        snprintf(g_toast, sizeof g_toast, "当前已是%s",
-                 !strcmp(pin, "0200") ? "中国移动" :
-                 !strcmp(pin, "0300") ? "中国电信" :
-                 !strcmp(pin, "0100") ? "中国联通" : "该网络");
-        g_toast_until = now + 1800;
-        need_render = 1;
-    } else {
-        plugin_action_note(FMSWITCH_ACTION_LOG, "开始切卡");
-        snprintf(verb, sizeof verb, "switch %s", pin);
-        plugin_action_submit(FMSWITCH_ACTION_LOG, "sh ", p->ctl, verb, "切卡操作");
-        need_render = 1;
-    }
-}
-                } else if (!strcmp(a, "backfunc")) {
-
+                    }
+                    else if (!strcmp(a, "backfunc")) { 
                             subpage_close();
                             menu = 0;
                             g_modal = 0;
