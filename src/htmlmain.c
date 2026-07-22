@@ -6155,6 +6155,7 @@ static int build_kv(struct kv *t, const char *path)
     t[i++] = (struct kv){ "FMPROGRESS", s_fm_progress };
     t[i++] = (struct kv){ "FMLOG", s_fm_log };
     t[i++] = (struct kv){ "FMCURPIN", g_fm_pin };
+    t[i++] = (struct kv){ "FMCURRNETCLS", g_fm_pin[0] ? "net-current" : "" };
 	t[i++] = (struct kv){ "FMTOAST", s_fm_toast };
     return i;
 }
