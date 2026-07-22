@@ -6089,6 +6089,45 @@ static int build_kv(struct kv *t, const char *path)
     t[i++] = (struct kv){ "OPCANCELCLASS", g_op_job_running ? "" : "disabled" };
     plugin_action_log_html(s_op_action_log, sizeof s_op_action_log, OPERATOR_ACTION_LOG);
     t[i++] = (struct kv){ "OPACTIONLOG", s_op_action_log };
+	    /* ========== 新增：读取切卡结果 Toast ========== */
+    char s_fm_toast[1024] = "";
+    char toast_type[16] = "";
+    char toast_title[64] = "";
+    char toast_msg[128] = "";
+    
+    FILE *fp = fopen("/tmp/fmswitch_result", "r");
+    if (fp) {
+        char line[256];
+        while (fgets(line, sizeof(line), fp)) {
+            size_t len = strlen(line);
+            if (len > 0 && line[len-1] == '\n') line[len-1] = '\0';
+            
+            if (strncmp(line, "FMTOAST_TYPE=", 13) == 0) {
+                strncpy(toast_type, line + 13, sizeof(toast_type) - 1);
+            } else if (strncmp(line, "FMTOAST_TITLE=", 14) == 0) {
+                strncpy(toast_title, line + 14, sizeof(toast_title) - 1);
+            } else if (strncmp(line, "FMTOAST_MSG=", 12) == 0) {
+                strncpy(toast_msg, line + 12, sizeof(toast_msg) - 1);
+            }
+        }
+        fclose(fp);
+        unlink("/tmp/fmswitch_result");  /* 读取后删除，避免重复显示 */
+    }
+    
+    if (toast_type[0]) {
+        const char *icon = !strcmp(toast_type, "success") ? "✓" :
+                           !strcmp(toast_type, "error") ? "✗" :
+                           !strcmp(toast_type, "warn") ? "⚠" : "ℹ";
+        
+        snprintf(s_fm_toast, sizeof s_fm_toast,
+            "<div class=\"toast-mask\">"
+            "<div class=\"toast-box toast %s\">"
+            "<div class=\"toast-icon\">%s</div>"
+            "<div class=\"toast-title\">%s</div>"
+            "<div class=\"toast-desc\">%s</div>"
+            "</div></div>",
+            toast_type, icon, toast_title, toast_msg);
+    }
     /* ---- 飞猫分身切卡状态 ---- */
     static char s_fm_progress[512], s_fm_log[2200], s_fm_state[32], s_fm_state_cls[16];
     if (g_fm_switching) {
@@ -6119,6 +6158,7 @@ static int build_kv(struct kv *t, const char *path)
     t[i++] = (struct kv){ "FMLOG", s_fm_log };
     t[i++] = (struct kv){ "FMCURPIN", g_fm_pin };
     t[i++] = (struct kv){ "FMCURRNETCLS", g_fm_pin[0] ? "net-current" : "" };
+	t[i++] = (struct kv){ "FMTOAST", s_fm_toast };
     return i;
 }
 
