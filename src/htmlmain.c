@@ -7674,7 +7674,7 @@ queued_done:
                             last_act = now;
                             need_render = 1;
                         }
-                        else if (!strncmp(a, "func:", 5)) {
+                    else if (!strncmp(a, "func:", 5)) {
                             if (function_page_open(a + 5)) {
                                 menu = 0;
                                 g_modal = 0;
@@ -7686,10 +7686,11 @@ queued_done:
                             }
                             last_act = now;
                             need_render = 1;
-                                            }
-                    else if (strncmp(act, "act:fmswitch:", 13) == 0) { 
+                    }
+                    else if (strncmp(act, "act:fmswitch:", 13) == 0) {
                         const char *pin = act + 13;
                         char verb[64];
+                        const struct plugin_candidate *pc = plugin_script_select(g_fm_candidates, ARRAY_LEN(g_fm_candidates), 1);
                         
                         /* 已经是当前网络，直接提示 */
                         if (g_fm_pin[0] && !strcmp(g_fm_pin, pin)) {
@@ -7699,30 +7700,24 @@ queued_done:
                                      !strcmp(pin, "0100") ? "中国联通" : "该网络");
                             g_toast_until = now + 1800;
                             need_render = 1;
-                        } else {
+                        } else if (pc) {
                             plugin_action_note(FMSWITCH_ACTION_LOG, "开始切卡");
                             snprintf(verb, sizeof verb, "switch %s", pin);
-                            plugin_action_submit(FMSWITCH_ACTION_LOG, "sh ", p->ctl, verb, "切卡操作");
+                            plugin_action_submit(FMSWITCH_ACTION_LOG, "sh ", pc->ctl, verb, "切卡操作");
+                            need_render = 1;
+                        } else {
+                            snprintf(g_toast, sizeof g_toast, "飞猫分身插件未安装");
+                            g_toast_until = now + 1800;
                             need_render = 1;
                         }
                     }
-                    else if (!strcmp(a, "backfunc")) { 
+                    else if (!strcmp(a, "backfunc")) {
                             subpage_close();
                             menu = 0;
                             g_modal = 0;
                             g_sms_open = -1;
                             invalidate_render_html_cache();
                             last_act = now;
-                            need_render = 1;
-                        }
-                        else if (!strcmp(a, "theme"))     { g_theme = !g_theme; save_conf(); need_render = 1; }
-                        else if (!strcmp(a, "revealkey")) { g_show_key = !g_show_key; need_render = 1; }
-                        else if (!strcmp(a, "revealcell")) { g_show_cellid = !g_show_cellid; need_render = 1; }
-                        else if (!strcmp(a, "revealimei")) { g_show_imei = !g_show_imei; need_render = 1; }
-                        else if (!strcmp(a, "refreshambr")) {
-                            system("(kill -USR1 $(pidof zwrt-datad 2>/dev/null) >/dev/null 2>&1) || true");
-                            snprintf(g_toast, sizeof g_toast, "已请求刷新 AMBR");
-                            g_toast_until = now + 1600;
                             need_render = 1;
                         }
                         else if (!strcmp(a, "neighbors")) {
