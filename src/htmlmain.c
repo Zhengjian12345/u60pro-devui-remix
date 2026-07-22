@@ -107,6 +107,7 @@ static uint32_t monotonic_seconds(void)
 #define CPU_CTL_LEGACY  UI_DIR "/../cpuctl.sh"
 #define CPU_CTL_OLD     "/data/ufi-tools/u60pro-devui/cpuctl.sh"
 #define CPU_ACTION_LOG "/tmp/devui-cpu-action.log"
+#define FMSWITCH_ACTION_LOG "/tmp/devui-fmswitch-action.log"
 
 struct plugin_candidate {
     const char *dir;
