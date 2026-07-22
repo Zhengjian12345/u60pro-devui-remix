@@ -219,6 +219,14 @@ static char g_op_rat_pref[16] = "auto", g_op_failure_policy[24] = "stay_offline"
 static char g_op_selected[8];
 static uint32_t g_op_confirm_until;
 static struct operator_candidate_state g_op_scan[OP_MAX_CANDIDATES];
+static int g_fm_installed, g_fm_switching;
+static char g_fm_provider[48] = "-";
+static char g_fm_nettype[16] = "-";
+static char g_fm_band[16] = "-";
+static char g_fm_signal[8] = "-";
+static char g_fm_mcc[8] = "-";
+static char g_fm_mnc[8] = "-";
+static char g_fm_pin[8] = "-";
 
 static const char *cpu_ctl_path(void)
 {
