@@ -1170,7 +1170,8 @@ static int plugin_status_page(const char *path)
                     strstr(path, "/functions/mihomo.html") ||
                     strstr(path, "/functions/cpu-performance.html") ||
                     strstr(path, "/functions/wireguard.html") ||
-                    strstr(path, "/functions/operator-lock.html"));
+                    strstr(path, "/functions/operator-lock.html") ||
+                    strstr(path, "/functions/fmswitch.html"));
 }
 
 static int plugin_page_named(const char *path, const char *name)
@@ -6154,7 +6155,6 @@ static int build_kv(struct kv *t, const char *path)
     t[i++] = (struct kv){ "FMPROGRESS", s_fm_progress };
     t[i++] = (struct kv){ "FMLOG", s_fm_log };
     t[i++] = (struct kv){ "FMCURPIN", g_fm_pin };
-    t[i++] = (struct kv){ "FMCURRNETCLS", g_fm_pin[0] ? "net-current" : "" };
 	t[i++] = (struct kv){ "FMTOAST", s_fm_toast };
     return i;
 }
