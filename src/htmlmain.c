@@ -1571,6 +1571,7 @@ static void plugin_status_refresh(const char *path, int force)
     else if (plugin_page_named(path, "cpu-performance.html")) refresh_cpu_status();
     else if (plugin_page_named(path, "wireguard.html")) refresh_wireguard_status();
     else if (plugin_page_named(path, "operator-lock.html")) refresh_operator_status();
+    else if (plugin_page_named(path, "fmswitch.html")) refresh_fmswitch_status();
 }
 
 /* ---- screen lock (PIN) persistence. The PIN lives in a dotfile under the UI
