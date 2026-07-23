@@ -338,7 +338,7 @@ body.light .subback { background: #ffffff; color: #172232; border: 1px solid #d6
 
 /* service controls: persistent start/stop state and separate one-shot actions */
 .svc-grid { margin: 3px -3px 0; font-size: 0; }
-.svc-btn { display: inline-block; box-sizing: border-box; width: 47%; margin: 3px 1.5%;
+.svc-btn { display: inline-block; box-sizing: border-box; width: 46%; margin: 3px 1.5%;
            padding: 9px 2px; border-radius: 5px; text-align: center;
            text-decoration: none; font-size: 13px; font-weight: 600; }
 body.dark  .svc-btn { background: #202b38; color: #d8dde5; }
