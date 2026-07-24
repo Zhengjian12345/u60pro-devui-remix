@@ -15,6 +15,7 @@
 
 - 双卡管理入口仅在 `simctl.sh` 可执行时显示（与 tailscale / mihomo / cpu 页面一致）。
 - 双卡流量页只要 HTML 存在即可显示；未安装 collector 时用量字段为 `-`。
+- `simctl.sh`：未就绪卡槽禁止切换；运营商识别覆盖联通（CUCC）。
 
 ## v1.2.11 - 2026-07-10
 

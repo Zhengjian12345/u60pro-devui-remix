@@ -67,3 +67,10 @@ adb shell 'touch /data/plugins/u60pro-devui/ui/02-functions.html'
 ```
 
 双卡管理入口只在 `simctl.sh` 可执行时显示（与 tailscale/mihomo/cpu 页面的“控制器可用才显示”策略一致）。双卡流量页只要文件存在即可显示。
+
+## 安全策略
+
+- `simctl.sh slot 1|2` 会先检查对应卡槽 `sim ready`。
+- 若卡槽未识别/未就绪，**拒绝切换**，返回 `ERROR SIMn_NOT_READY`，避免切到空卡导致断网。
+- 运营商识别支持 `CMCC/CUCC/CTCC` 及常见 PLMN；插拔卡常为联通（CUCC）。
+
