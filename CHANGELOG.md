@@ -2,6 +2,20 @@
 
 > 当前正式命名与安装路径已经统一为：`zwrt-datad`、`/data/plugins/zwrt-datad/zwrt-datad`、`/data/plugins/u60pro-devui/`、`/data/plugins/u60pro-devui/ui`。历史条目里如果出现 `u60-datad`、`/data/u60pro` 或 `/data/ui`，表示当时版本记录。
 
+## unreleased - dual-sim function pages
+
+### 新增
+
+- **双卡管理子分页**（`ui/functions/sim-switch.html`）：支持单卡/双卡双待、智能切换开关、SIM1/SIM2 数据卡切换，并显示当前卡槽与运营商。
+- **双卡流量子分页**（`ui/functions/sim-traffic.html`）：并排展示两张卡今日用量、本月已用/剩余与重置日；优先读取 `dual-sim-traffic/state.json`。
+- **固定控制脚本** `scripts/simctl.sh`：封装 `zwrt_zte_mdm.api` 相关 ubus 调用，供屏幕 `act:sim*` 动作使用，避免 HTML 任意执行 shell。
+- **文档** [docs/DUAL-SIM.md](docs/DUAL-SIM.md)：说明设备路径、动作表与安装方式。
+
+### 说明
+
+- 双卡管理入口仅在 `simctl.sh` 可执行时显示（与 tailscale / mihomo / cpu 页面一致）。
+- 双卡流量页只要 HTML 存在即可显示；未安装 collector 时用量字段为 `-`。
+
 ## v1.2.11 - 2026-07-10
 
 ### 修复

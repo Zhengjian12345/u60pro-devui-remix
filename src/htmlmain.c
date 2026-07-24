@@ -95,11 +95,22 @@ static uint32_t millis(void)
 #define MIHOMO_ACTION_LOG "/tmp/devui-mihomo-action.log"
 #define CPU_CTL UI_DIR "/../cpuctl.sh"
 #define CPU_ACTION_LOG "/tmp/devui-cpu-action.log"
+#define SIM_CTL UI_DIR "/../simctl.sh"
+#define SIM_ACTION_LOG "/tmp/devui-sim-action.log"
 
 static uint32_t g_plugin_status_at;
 static int g_ts_installed, g_ts_running, g_ts_connected, g_ts_boot;
 static int g_mh_installed, g_mh_running, g_mh_tun, g_mh_rules;
 static int g_cpu_installed;
+static int g_sim_installed, g_sim_dual, g_sim_slot, g_sim_auto, g_sim_p1, g_sim_p2;
+static char g_sim_ready[32] = "-", g_sim_mode[32] = "-", g_sim_current[64] = "-";
+static char g_sim_auto_txt[16] = "-", g_sim_op1[32] = "-", g_sim_op2[32] = "-";
+static char g_sim_use1[16] = "-", g_sim_use2[16] = "-";
+static char g_sim_day1[24] = "-", g_sim_day2[24] = "-";
+static char g_sim_used1[24] = "-", g_sim_used2[24] = "-";
+static char g_sim_left1[24] = "-", g_sim_left2[24] = "-";
+static char g_sim_reset1[24] = "-", g_sim_reset2[24] = "-";
+static char g_sim_src[48] = "-";
 static char g_ts_pid[16] = "-", g_ts_ip[48] = "-", g_ts_version[32] = "-";
 static char g_ts_host[64] = "-", g_ts_routes[160] = "-";
 static char g_mh_pid[16] = "-", g_mh_version[64] = "-", g_mh_mode[24] = "-";
@@ -870,7 +881,9 @@ static int plugin_status_page(const char *path)
     return path && (strstr(path, "/functions/tailscale.html") ||
                     strstr(path, "/functions/clash.html") ||
                     strstr(path, "/functions/mihomo.html") ||
-                    strstr(path, "/functions/cpu-performance.html"));
+                    strstr(path, "/functions/cpu-performance.html") ||
+                    strstr(path, "/functions/sim-switch.html") ||
+                    strstr(path, "/functions/sim-traffic.html"));
 }
 
 static void plugin_status_refresh(const char *path, int force)
@@ -886,6 +899,7 @@ static void plugin_status_refresh(const char *path, int force)
     g_ts_installed = g_ts_running = g_ts_connected = g_ts_boot = 0;
     g_mh_installed = g_mh_running = g_mh_tun = g_mh_rules = 0;
     g_cpu_installed = 0;
+    g_sim_installed = g_sim_dual = g_sim_slot = g_sim_auto = g_sim_p1 = g_sim_p2 = 0;
     snprintf(g_ts_pid, sizeof g_ts_pid, "-");
     snprintf(g_ts_ip, sizeof g_ts_ip, "-");
     snprintf(g_ts_version, sizeof g_ts_version, "-");
@@ -901,6 +915,23 @@ static void plugin_status_refresh(const char *path, int force)
     snprintf(g_cpu_cur, sizeof g_cpu_cur, "-");
     snprintf(g_cpu_min, sizeof g_cpu_min, "-");
     snprintf(g_cpu_max, sizeof g_cpu_max, "-");
+    snprintf(g_sim_ready, sizeof g_sim_ready, "-");
+    snprintf(g_sim_mode, sizeof g_sim_mode, "-");
+    snprintf(g_sim_current, sizeof g_sim_current, "-");
+    snprintf(g_sim_auto_txt, sizeof g_sim_auto_txt, "-");
+    snprintf(g_sim_op1, sizeof g_sim_op1, "-");
+    snprintf(g_sim_op2, sizeof g_sim_op2, "-");
+    snprintf(g_sim_use1, sizeof g_sim_use1, "-");
+    snprintf(g_sim_use2, sizeof g_sim_use2, "-");
+    snprintf(g_sim_day1, sizeof g_sim_day1, "-");
+    snprintf(g_sim_day2, sizeof g_sim_day2, "-");
+    snprintf(g_sim_used1, sizeof g_sim_used1, "-");
+    snprintf(g_sim_used2, sizeof g_sim_used2, "-");
+    snprintf(g_sim_left1, sizeof g_sim_left1, "-");
+    snprintf(g_sim_left2, sizeof g_sim_left2, "-");
+    snprintf(g_sim_reset1, sizeof g_sim_reset1, "-");
+    snprintf(g_sim_reset2, sizeof g_sim_reset2, "-");
+    snprintf(g_sim_src, sizeof g_sim_src, "-");
 
     fp = popen(
         "echo TS_INST=$([ -x " TAILSCALE_CTL " ] && [ -x " TAILSCALE_DIR "/bin/tailscale ] && echo 1 || echo 0);"
@@ -918,7 +949,9 @@ static void plugin_status_refresh(const char *path, int force)
         "echo MH_MODE=$(sed -n 's/^mode:[[:space:]]*//p' " MIHOMO_DIR "/config.yaml 2>/dev/null | head -1);"
         "echo MH_PORT=$(sed -n 's/^mixed-port:[[:space:]]*//p' " MIHOMO_DIR "/config.yaml 2>/dev/null | head -1);"
         "echo MH_IPSET=$(ipset list chnroute 2>/dev/null | awk -F': ' '/Number of entries/{print $2;exit}');"
-        "if [ -x " CPU_CTL " ]; then " CPU_CTL " status 2>/dev/null; else echo CPU_INST=0; fi",
+        "if [ -x " CPU_CTL " ]; then " CPU_CTL " status 2>/dev/null; else echo CPU_INST=0; fi;"
+        "echo SIM_INST=$([ -x " SIM_CTL " ] && echo 1 || echo 0);"
+        "if [ -x " SIM_CTL " ]; then " SIM_CTL " status 2>/dev/null; fi",
         "r");
     if (!fp) return;
     while (fgets(line, sizeof line, fp)) {
@@ -943,6 +976,29 @@ static void plugin_status_refresh(const char *path, int force)
         else if (!strncmp(line, "CPU_CUR=", 8))   line_value(g_cpu_cur, sizeof g_cpu_cur, line, 8);
         else if (!strncmp(line, "CPU_MIN=", 8))   line_value(g_cpu_min, sizeof g_cpu_min, line, 8);
         else if (!strncmp(line, "CPU_MAX=", 8))   line_value(g_cpu_max, sizeof g_cpu_max, line, 8);
+        else if (!strncmp(line, "SIM_INST=", 9))  g_sim_installed = atoi(line + 9);
+        else if (!strncmp(line, "READY=", 6))     line_value(g_sim_ready, sizeof g_sim_ready, line, 6);
+        else if (!strncmp(line, "DUAL=", 5))      g_sim_dual = atoi(line + 5);
+        else if (!strncmp(line, "SLOT=", 5))      g_sim_slot = atoi(line + 5);
+        else if (!strncmp(line, "MODE=", 5))      line_value(g_sim_mode, sizeof g_sim_mode, line, 5);
+        else if (!strncmp(line, "CURRENT=", 8))   line_value(g_sim_current, sizeof g_sim_current, line, 8);
+        else if (!strncmp(line, "AUTO=", 5))      line_value(g_sim_auto_txt, sizeof g_sim_auto_txt, line, 5);
+        else if (!strncmp(line, "AUTO_FLAG=", 10)) g_sim_auto = atoi(line + 10);
+        else if (!strncmp(line, "OP1=", 4))       line_value(g_sim_op1, sizeof g_sim_op1, line, 4);
+        else if (!strncmp(line, "OP2=", 4))       line_value(g_sim_op2, sizeof g_sim_op2, line, 4);
+        else if (!strncmp(line, "USE1=", 5))      line_value(g_sim_use1, sizeof g_sim_use1, line, 5);
+        else if (!strncmp(line, "USE2=", 5))      line_value(g_sim_use2, sizeof g_sim_use2, line, 5);
+        else if (!strncmp(line, "P1=", 3))        g_sim_p1 = atoi(line + 3);
+        else if (!strncmp(line, "P2=", 3))        g_sim_p2 = atoi(line + 3);
+        else if (!strncmp(line, "DAY1=", 5))      line_value(g_sim_day1, sizeof g_sim_day1, line, 5);
+        else if (!strncmp(line, "DAY2=", 5))      line_value(g_sim_day2, sizeof g_sim_day2, line, 5);
+        else if (!strncmp(line, "USED1=", 6))     line_value(g_sim_used1, sizeof g_sim_used1, line, 6);
+        else if (!strncmp(line, "USED2=", 6))     line_value(g_sim_used2, sizeof g_sim_used2, line, 6);
+        else if (!strncmp(line, "LEFT1=", 6))     line_value(g_sim_left1, sizeof g_sim_left1, line, 6);
+        else if (!strncmp(line, "LEFT2=", 6))     line_value(g_sim_left2, sizeof g_sim_left2, line, 6);
+        else if (!strncmp(line, "RESET1=", 7))    line_value(g_sim_reset1, sizeof g_sim_reset1, line, 7);
+        else if (!strncmp(line, "RESET2=", 7))    line_value(g_sim_reset2, sizeof g_sim_reset2, line, 7);
+        else if (!strncmp(line, "SRC=", 4))       line_value(g_sim_src, sizeof g_sim_src, line, 4);
     }
     pclose(fp);
     g_ts_running = strcmp(g_ts_pid, "-") != 0;
@@ -1372,6 +1428,9 @@ static int function_control_api_available(const char *name)
         return access(MIHOMO_CTL, X_OK) == 0;
     if (!strcmp(name, "cpu-performance.html"))
         return access(CPU_CTL, X_OK) == 0;
+    /* Dual-SIM manager needs the fixed control adapter; traffic page is view-only. */
+    if (!strcmp(name, "sim-switch.html"))
+        return access(SIM_CTL, X_OK) == 0;
     return 1;
 }
 
@@ -4988,6 +5047,38 @@ static int build_kv(struct kv *t, const char *path)
     t[i++] = (struct kv){ "CPUMAX", g_cpu_max };
     plugin_action_log_html(s_cpu_action_log, sizeof s_cpu_action_log, CPU_ACTION_LOG);
     t[i++] = (struct kv){ "CPUACTIONLOG", s_cpu_action_log };
+
+    t[i++] = (struct kv){ "SIMREADY", g_sim_ready };
+    t[i++] = (struct kv){ "SIMREADYCLASS", g_sim_dual ? "ok" : "muted" };
+    t[i++] = (struct kv){ "SIMMODE", g_sim_mode };
+    t[i++] = (struct kv){ "SIMCURRENT", g_sim_current };
+    t[i++] = (struct kv){ "SIMAUTO", g_sim_auto_txt };
+    t[i++] = (struct kv){ "SIMSINGLECLASS", (g_sim_p1 + g_sim_p2) == 1 ? "seg-on" : "" };
+    t[i++] = (struct kv){ "SIMDUALCLASS", (g_sim_p1 == 1 && g_sim_p2 == 1) ? "seg-on" : "" };
+    t[i++] = (struct kv){ "SIMAUTOONCLASS", g_sim_auto ? "seg-on" : "" };
+    t[i++] = (struct kv){ "SIMAUTOOFFCLASS", g_sim_installed && !g_sim_auto ? "seg-on" : "" };
+    t[i++] = (struct kv){ "SIM1CLASS", g_sim_slot == 1 ? "seg-on" : "" };
+    t[i++] = (struct kv){ "SIM2CLASS", g_sim_slot == 2 ? "seg-on" : "" };
+    t[i++] = (struct kv){ "SIM1OP", g_sim_op1 };
+    t[i++] = (struct kv){ "SIM2OP", g_sim_op2 };
+    t[i++] = (struct kv){ "SIM1USE", g_sim_use1 };
+    t[i++] = (struct kv){ "SIM2USE", g_sim_use2 };
+    t[i++] = (struct kv){ "SIM1USECLASS", g_sim_slot == 1 ? "ok" : "muted" };
+    t[i++] = (struct kv){ "SIM2USECLASS", g_sim_slot == 2 ? "ok" : "muted" };
+    t[i++] = (struct kv){ "SIM1DAY", g_sim_day1 };
+    t[i++] = (struct kv){ "SIM2DAY", g_sim_day2 };
+    t[i++] = (struct kv){ "SIM1USED", g_sim_used1 };
+    t[i++] = (struct kv){ "SIM2USED", g_sim_used2 };
+    t[i++] = (struct kv){ "SIM1LEFT", g_sim_left1 };
+    t[i++] = (struct kv){ "SIM2LEFT", g_sim_left2 };
+    t[i++] = (struct kv){ "SIM1RESET", g_sim_reset1 };
+    t[i++] = (struct kv){ "SIM2RESET", g_sim_reset2 };
+    t[i++] = (struct kv){ "SIMTRAFFICSRC", g_sim_src };
+    {
+        static char s_sim_action_log[768];
+        plugin_action_log_html(s_sim_action_log, sizeof s_sim_action_log, SIM_ACTION_LOG);
+        t[i++] = (struct kv){ "SIMACTIONLOG", s_sim_action_log };
+    }
     return i;
 }
 
@@ -6855,6 +6946,53 @@ queued_done:
                                 plugin_action_submit(CPU_ACTION_LOG, "", CPU_CTL, mode, label);
                                 snprintf(g_toast, sizeof g_toast, "CPU %s已提交", label);
                                 g_plugin_status_at = 0;
+                            }
+                            g_toast_until = now + 1800;
+                            last_act = now;
+                            need_render = 1;
+                        }
+                        else if (!strcmp(a, "simsingle") || !strcmp(a, "simdual") ||
+                                 !strncmp(a, "simslot:", 8) || !strncmp(a, "simauto:", 8) ||
+                                 !strcmp(a, "simrefresh")) {
+                            if (!strcmp(a, "simrefresh")) {
+                                plugin_status_refresh(CUR_PATH, 1);
+                                plugin_action_note(SIM_ACTION_LOG, "手动刷新状态");
+                                snprintf(g_toast, sizeof g_toast, "双卡状态已刷新");
+                            } else if (!g_sim_installed) {
+                                snprintf(g_toast, sizeof g_toast, "simctl 未安装");
+                            } else if (!strcmp(a, "simsingle")) {
+                                plugin_action_submit(SIM_ACTION_LOG, "sh ", SIM_CTL, "single", "单卡模式");
+                                snprintf(g_toast, sizeof g_toast, "单卡模式已提交");
+                                g_plugin_status_at = 0;
+                            } else if (!strcmp(a, "simdual")) {
+                                plugin_action_submit(SIM_ACTION_LOG, "sh ", SIM_CTL, "dual", "双卡双待");
+                                snprintf(g_toast, sizeof g_toast, "双卡双待已提交");
+                                g_plugin_status_at = 0;
+                            } else if (!strncmp(a, "simslot:", 8)) {
+                                const char *n = a + 8;
+                                if (n[0] == '1' || n[0] == '2') {
+                                    char verb[16];
+                                    snprintf(verb, sizeof verb, "slot %c", n[0]);
+                                    plugin_action_submit(SIM_ACTION_LOG, "sh ", SIM_CTL, verb,
+                                                         n[0] == '1' ? "切换到 SIM1" : "切换到 SIM2");
+                                    snprintf(g_toast, sizeof g_toast, "切换到 SIM%c 已提交", n[0]);
+                                    g_plugin_status_at = 0;
+                                } else {
+                                    snprintf(g_toast, sizeof g_toast, "无效卡槽");
+                                }
+                            } else if (!strncmp(a, "simauto:", 8)) {
+                                const char *n = a + 8;
+                                if (n[0] == '0' || n[0] == '1') {
+                                    char verb[16];
+                                    snprintf(verb, sizeof verb, "auto %c", n[0]);
+                                    plugin_action_submit(SIM_ACTION_LOG, "sh ", SIM_CTL, verb,
+                                                         n[0] == '1' ? "开启智能切换" : "关闭智能切换");
+                                    snprintf(g_toast, sizeof g_toast,
+                                             n[0] == '1' ? "智能切换已开启" : "智能切换已关闭");
+                                    g_plugin_status_at = 0;
+                                } else {
+                                    snprintf(g_toast, sizeof g_toast, "无效参数");
+                                }
                             }
                             g_toast_until = now + 1800;
                             last_act = now;

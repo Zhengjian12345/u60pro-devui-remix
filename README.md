@@ -9,6 +9,7 @@
 - 提供启动、停止、重启和手动刷新操作，启动/停止按真实状态高亮。
 - 页面内显示最近三条带时间戳的操作记录，并保留即时 toast 反馈。
 - 提供基于 Linux cpufreq 的 CPU 省电、均衡、性能和极致模式控制页面。
+- 提供双卡管理 / 双卡流量屏幕子分页：单卡与双卡双待、智能切换、数据卡选择，以及双卡用量展示。
 - 只允许调用固定控制脚本，不向自定义 HTML 暴露任意 Shell 执行能力。
 
 对应设备路径为：
@@ -16,6 +17,9 @@
 ```text
 /data/plugins/tailscale/tsctl.sh
 /data/ufi-tools/mihomo/mm.sh
+/data/plugins/u60pro-devui/simctl.sh
+/data/plugins/u60pro-devui/ui/functions/sim-switch.html
+/data/plugins/u60pro-devui/ui/functions/sim-traffic.html
 ```
 
 这是 ZTE U60Pro 以及类似 SDX 系列 5G MiFi 设备前面板屏幕 UI 的一个 clean-room 开源替代实现。运行在标准 Linux 的 **DRM/KMS** 和 **evdev** 接口之上，目标是：
