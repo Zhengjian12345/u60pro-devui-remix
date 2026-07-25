@@ -1,76 +1,50 @@
-# 双卡管理 / 双卡流量子分页
+# 双卡管理与持久流量
 
-本 Remix 在“更多功能”页集成两个自定义子分页：
+Remix 在“更多功能”页提供两个仅限双卡 U60Pro 显示的内置页面：
 
 | 页面 | 路径 | 作用 |
 |------|------|------|
-| 双卡管理 | `ui/functions/sim-switch.html` | 单卡/双卡模式、智能切换、数据卡选择 |
-| 双卡流量 | `ui/functions/sim-traffic.html` | 双卡今日/本月用量与剩余额度展示 |
+| 双卡管理 | `ui/functions/sim-switch.html` | 驻网模式、智能切换、当前数据卡和卡槽状态 |
+| 双卡流量 | `ui/functions/sim-traffic.html` | 按 ICCID 持久统计、套餐额度和每月重置日 |
 
-页面通过 `{{CUSTOMFUNCTIONTILES}}` 自动扫描出现在更多功能列表中。
+页面入口要求厂商接口返回 `support_dual_sim=1`。双卡流量页还要求配套
+`zwrt-datad` 在 `/state` 中提供 `sim_traffic.available=true`，单卡设备和旧后端不会显示入口。
 
-## 设备路径
+## 双卡控制
 
-```text
-/data/plugins/u60pro-devui/ui/functions/sim-switch.html
-/data/plugins/u60pro-devui/ui/functions/sim-traffic.html
-/data/plugins/u60pro-devui/simctl.sh
-```
-
-`simctl.sh` 是 DevUI 允许调用的固定控制脚本（与 `cpuctl.sh` / `tsctl.sh` 同一模式），只接受有限子命令：
-
-```sh
-simctl.sh status
-simctl.sh single
-simctl.sh dual
-simctl.sh slot 1|2
-simctl.sh auto 0|1
-```
-
-底层通过 U60Pro `ubus` 调用 `zwrt_zte_mdm.api`：
-
-- `get_sim_info_before` — 读双卡状态
-- `zwrt_mdm_change_provision_session` — 单卡/双卡驻网
-- `zwrt_zte_mdm_activate_sim` — 切换数据卡
-- `st_set_auto_switch_slot` — 智能双卡切换
-
-## 屏幕动作
+DevUI 只允许以下固定动作：
 
 | act | 含义 |
 |-----|------|
-| `act:simsingle` | 单卡模式 |
-| `act:simdual` | 双卡双待 |
-| `act:simslot:1` / `act:simslot:2` | 切换数据卡 |
-| `act:simauto:0` / `act:simauto:1` | 关闭/开启智能切换 |
-| `act:simrefresh` | 刷新状态 |
+| `act:simmanage:single` | 切换为单卡模式 |
+| `act:simmanage:dual` | 切换为双卡双待 |
+| `act:simslot:1` / `act:simslot:2` | 切换自插卡 / 内置卡 |
+| `act:simsmart:0` / `act:simsmart:1` | 关闭 / 开启智能切换 |
+| `act:simmoderefresh` | 刷新双卡状态 |
 
-## 可选流量采集器
+驻网模式和数据卡切换均使用 4 秒二次确认，并在后台调用 U60Pro 固定 `ubus` 接口。
+操作期间共用一个状态锁，最多等待 60 秒，以真实卡槽和 provision 状态回读判断成功，
+不会执行页面提供的任意 Shell 命令。
 
-`sim-traffic.html` 默认用 `simctl.sh status` 读取基础 SIM 状态，并尽量解析：
+## 流量统计
+
+配套 datad 从 `zwrt_data.get_wwandst` 读取当前蜂窝会话计数，并按 ICCID 哈希分开保存：
 
 ```text
-/data/plugins/dual-sim-traffic/state.json
+/data/plugins/zwrt-datad/traffic-state.json
+/data/plugins/zwrt-datad/traffic-config.json
+/data/plugins/zwrt-datad/timezone.json
 ```
 
-若安装了社区/自研 collector（例如设备上的 `dual-sim-traffic/collector.lua`），剩余套餐、今日累计等会更完整。未安装时页面仍可打开，用量字段显示为 `-`。
+- 进程和设备重启后继续累计，计数器回退时只重建基线，不把异常差值计入用量。
+- 普通采样只更新内存，最多每 5 分钟写盘；切卡和正常退出时强制保存。
+- 今日和套餐周期使用 DevUI 固定偏移时区，不依赖系统 `TZ`。
+- 套餐以整 GiB 设置，可为每张已识别 ICCID 独立启用，并设置每月 `1-31` 日重置。
+- 页面只展示当前或最近使用的每个卡槽记录；历史记录仍保留在 datad 状态文件中。
 
-## 安装
+## 安全边界
 
-```sh
-adb shell 'mkdir -p /data/plugins/u60pro-devui/ui/functions'
-adb push ui/functions/sim-switch.html /data/plugins/u60pro-devui/ui/functions/
-adb push ui/functions/sim-traffic.html /data/plugins/u60pro-devui/ui/functions/
-adb push scripts/simctl.sh /data/plugins/u60pro-devui/simctl.sh
-adb shell 'chmod 755 /data/plugins/u60pro-devui/simctl.sh'
-# 触碰功能页以刷新入口
-adb shell 'touch /data/plugins/u60pro-devui/ui/02-functions.html'
-```
-
-双卡管理入口只在 `simctl.sh` 可执行时显示（与 tailscale/mihomo/cpu 页面的“控制器可用才显示”策略一致）。双卡流量页只要文件存在即可显示。
-
-## 安全策略
-
-- `simctl.sh slot 1|2` 会先检查对应卡槽 `sim ready`。
-- 若卡槽未识别/未就绪，**拒绝切换**，返回 `ERROR SIMn_NOT_READY`，避免切到空卡导致断网。
-- 运营商识别支持 `CMCC/CUCC/CTCC` 及常见 PLMN；插拔卡常为联通（CUCC）。
-
+- `sim-switch.html` 不再依赖或打包独立 `simctl.sh`。
+- 切卡、单卡/双卡切换共用 DevUI 原有的异步确认状态机。
+- 流量和时区设置只通过监听 `127.0.0.1:9460` 的 datad 固定 API 提交。
+- ICCID 不直接显示或写入 UI 日志，页面只显示末四位。

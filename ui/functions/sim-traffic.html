@@ -6,39 +6,45 @@
 </head>
 <body>
   <div class="card">
-    <div class="title">双卡流量 <span class="r muted">手动基准 · 自动扣减</span></div>
-    <p class="func-note">展示两张 SIM 的今日/本月用量与剩余额度。剩余值可通过外部 collector 或手动基准维护。</p>
+    <div class="title">按卡持久统计 <span class="r {{SIMTRAFFICSTATECLASS}}">{{SIMTRAFFICSTATE}}</span></div>
+    <p class="func-note">按 ICCID 分开累计，重启不会归零；每日和套餐周期按 DevUI 时区结算</p>
   </div>
 
-  <div class="card">
-    <div class="title">插拔卡 · SIM1 <span class="r {{SIM1USECLASS}}">{{SIM1USE}}</span></div>
-    <table>
-      <tr><td class="kv-l">运营商</td><td class="val">{{SIM1OP}}</td></tr>
-      <tr><td class="kv-l">今日用量</td><td class="val">{{SIM1DAY}}</td></tr>
-      <tr><td class="kv-l">本月已用</td><td class="val">{{SIM1USED}}</td></tr>
-      <tr><td class="kv-l">本月剩余</td><td class="val">{{SIM1LEFT}}</td></tr>
-      <tr><td class="kv-l">重置日期</td><td class="val">{{SIM1RESET}}</td></tr>
-    </table>
-  </div>
+  {{SIMTRAFFICCARDS}}
 
-  <div class="card">
-    <div class="title">内置卡 · SIM2 <span class="r {{SIM2USECLASS}}">{{SIM2USE}}</span></div>
-    <table>
-      <tr><td class="kv-l">运营商</td><td class="val">{{SIM2OP}}</td></tr>
-      <tr><td class="kv-l">今日用量</td><td class="val">{{SIM2DAY}}</td></tr>
-      <tr><td class="kv-l">本月已用</td><td class="val">{{SIM2USED}}</td></tr>
-      <tr><td class="kv-l">本月剩余</td><td class="val">{{SIM2LEFT}}</td></tr>
-      <tr><td class="kv-l">重置日期</td><td class="val">{{SIM2RESET}}</td></tr>
-    </table>
-  </div>
+  <div class="card traffic-plan-card">
+    <div class="title">套餐设置</div>
+    <div class="seg seg2">
+      <a href="act:trafficselect:1" class="segc {{PLAN1CLASS}}">自插卡</a>
+      <a href="act:trafficselect:2" class="segc {{PLAN2CLASS}}">内置卡</a>
+    </div>
+    <div class="traffic-plan-title">{{PLANTITLE}}</div>
 
-  <div class="card">
-    <div class="title">数据源</div>
-    <table>
-      <tr><td class="kv-l">当前数据卡</td><td class="val">{{SIMCURRENT}}</td></tr>
-      <tr><td class="kv-l">采集器</td><td class="val">{{SIMTRAFFICSRC}}</td></tr>
-    </table>
-    <p class="func-note">可选安装 `/data/plugins/dual-sim-traffic/collector.lua` 做实时累计；未安装时显示基础 SIM 状态与占位流量。</p>
+    <div class="seg seg2 traffic-plan-toggle">
+      <a href="act:trafficenabled:1" class="segc {{PLANENABLECLASS}}">启用套餐</a>
+      <a href="act:trafficenabled:0" class="segc {{PLANDISABLECLASS}}">仅统计</a>
+    </div>
+
+    <div class="step-row">
+      <div class="step-label">套餐总量</div>
+      <a href="act:trafficgib:-10" class="step-btn">-10</a>
+      <a href="act:trafficgib:-1" class="step-btn">-1</a>
+      <span class="step-value">{{PLANGIB}}</span>
+      <a href="act:trafficgib:1" class="step-btn">+1</a>
+      <a href="act:trafficgib:10" class="step-btn">+10</a>
+    </div>
+
+    <div class="step-row step-day">
+      <div class="step-label">每月重置日</div>
+      <a href="act:trafficday:-1" class="step-btn">-</a>
+      <span class="step-value">{{PLANRESETDAY}} 日</span>
+      <a href="act:trafficday:1" class="step-btn">+</a>
+    </div>
+
+    <div class="traffic-plan-state">{{PLANSTATE}}</div>
+    <div class="svc-grid">
+      <a href="act:trafficapply" class="svc-btn svc-wide {{PLANAPPLYCLASS}}">保存套餐设置</a>
+    </div>
   </div>
 </body>
 </html>
