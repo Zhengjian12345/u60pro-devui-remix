@@ -107,6 +107,8 @@ static uint32_t monotonic_seconds(void)
 #define CPU_CTL_LEGACY  UI_DIR "/../cpuctl.sh"
 #define CPU_CTL_OLD     "/data/ufi-tools/u60pro-devui/cpuctl.sh"
 #define CPU_ACTION_LOG "/tmp/devui-cpu-action.log"
+#define SIM_CTL UI_DIR "/../simctl.sh"
+#define SIM_ACTION_LOG "/tmp/devui-sim-action.log"
 
 struct plugin_candidate {
     const char *dir;
@@ -1155,7 +1157,9 @@ static int plugin_status_page(const char *path)
                     strstr(path, "/functions/mihomo.html") ||
                     strstr(path, "/functions/cpu-performance.html") ||
                     strstr(path, "/functions/wireguard.html") ||
-                    strstr(path, "/functions/operator-lock.html"));
+                    strstr(path, "/functions/operator-lock.html") ||
+                    strstr(path, "/functions/sim-switch.html") ||
+                    strstr(path, "/functions/sim-traffic.html"));
 }
 
 static int plugin_page_named(const char *path, const char *name)
@@ -1995,6 +1999,8 @@ static int function_control_api_available(const char *name)
         return plugin_complete_select(g_wg_candidates, ARRAY_LEN(g_wg_candidates)) != NULL;
     if (!strcmp(name, "operator-lock.html"))
         return operator_complete_select() != NULL;
+    if (!strcmp(name, "sim-switch.html") || !strcmp(name, "sim-traffic.html"))
+        return 1;
     return 1;
 }
 
@@ -7976,6 +7982,53 @@ queued_done:
                                 plugin_action_submit(CPU_ACTION_LOG, "sh ", cpu_ctl_path(), mode, label);
                                 snprintf(g_toast, sizeof g_toast, "CPU %s已提交", label);
                                 g_plugin_status_at = 0;
+                            }
+                            g_toast_until = now + 1800;
+                            last_act = now;
+                            need_render = 1;
+                        }
+                        else if (!strcmp(a, "simsingle") || !strcmp(a, "simdual") ||
+                                 !strncmp(a, "simslot:", 8) || !strncmp(a, "simauto:", 8) ||
+                                 !strcmp(a, "simrefresh")) {
+                            if (!strcmp(a, "simrefresh")) {
+                                plugin_status_refresh(CUR_PATH, 1);
+                                plugin_action_note(SIM_ACTION_LOG, "手动刷新状态");
+                                snprintf(g_toast, sizeof g_toast, "双卡状态已刷新");
+                            } else if (!g_sim_installed) {
+                                snprintf(g_toast, sizeof g_toast, "simctl 未安装");
+                            } else if (!strcmp(a, "simsingle")) {
+                                plugin_action_submit(SIM_ACTION_LOG, "sh ", SIM_CTL, "single", "单卡模式");
+                                snprintf(g_toast, sizeof g_toast, "单卡模式已提交");
+                                g_plugin_status_at = 0;
+                            } else if (!strcmp(a, "simdual")) {
+                                plugin_action_submit(SIM_ACTION_LOG, "sh ", SIM_CTL, "dual", "双卡双待");
+                                snprintf(g_toast, sizeof g_toast, "双卡双待已提交");
+                                g_plugin_status_at = 0;
+                            } else if (!strncmp(a, "simslot:", 8)) {
+                                const char *n = a + 8;
+                                if (n[0] == '1' || n[0] == '2') {
+                                    char verb[16];
+                                    snprintf(verb, sizeof verb, "slot %c", n[0]);
+                                    plugin_action_submit(SIM_ACTION_LOG, "sh ", SIM_CTL, verb,
+                                                         n[0] == '1' ? "切换到 SIM1" : "切换到 SIM2");
+                                    snprintf(g_toast, sizeof g_toast, "切换到 SIM%c 已提交", n[0]);
+                                    g_plugin_status_at = 0;
+                                } else {
+                                    snprintf(g_toast, sizeof g_toast, "无效卡槽");
+                                }
+                            } else if (!strncmp(a, "simauto:", 8)) {
+                                const char *n = a + 8;
+                                if (n[0] == '0' || n[0] == '1') {
+                                    char verb[16];
+                                    snprintf(verb, sizeof verb, "auto %c", n[0]);
+                                    plugin_action_submit(SIM_ACTION_LOG, "sh ", SIM_CTL, verb,
+                                                         n[0] == '1' ? "开启智能切换" : "关闭智能切换");
+                                    snprintf(g_toast, sizeof g_toast,
+                                             n[0] == '1' ? "智能切换已开启" : "智能切换已关闭");
+                                    g_plugin_status_at = 0;
+                                } else {
+                                    snprintf(g_toast, sizeof g_toast, "无效参数");
+                                }
                             }
                             g_toast_until = now + 1800;
                             last_act = now;
